@@ -443,13 +443,34 @@ export class GameStore {
         throw new Error(`Failed to join room: ${playerError.message}`)
       }
 
-      // Update room activity
-      await supabase.from("game_rooms").update({ last_activity: now }).eq("id", upperRoomCode)
-
+      // After the player is successfully added, add this code:
       console.log(`Player joined: ${trimmedName} (${playerId}) to room ${upperRoomCode}`)
 
+      // Update room activity and trigger real-time update
+      await supabase
+        .from("game_rooms")
+        .update({
+          last_activity: now,
+          // Add a small increment to force real-time update
+          current_player_index: room.current_player_index,
+        })
+        .eq("id", upperRoomCode)
+
+      // Return the updated room with all current players
+      const { data: finalRoom } = await supabase
+        .from("game_rooms")
+        .select(`
+          *,
+          players (*)
+        `)
+        .eq("id", upperRoomCode)
+        .single()
+
       return {
-        room: { ...room, players: [...room.players.filter((p: any) => p.id !== existingPlayer?.id), newPlayer] },
+        room: finalRoom || {
+          ...room,
+          players: [...room.players.filter((p: any) => p.id !== existingPlayer?.id), newPlayer],
+        },
         playerId,
       }
     } catch (error) {
@@ -535,8 +556,10 @@ export class GameStore {
       const supabase = getSupabaseClient()
       const now = new Date().toISOString()
 
+      console.log(`Updating player ${playerId} with:`, updates)
+
       // Update player
-      const { error: playerError } = await supabase
+      const { data: updatedPlayer, error: playerError } = await supabase
         .from("players")
         .update({
           ...updates,
@@ -544,14 +567,23 @@ export class GameStore {
         })
         .eq("id", playerId)
         .eq("room_id", roomCode.toUpperCase())
+        .select()
+        .single()
 
       if (playerError) {
         console.error("Update player error:", playerError)
         throw new Error(`Failed to update player: ${playerError.message}`)
       }
 
-      // Update room activity
-      await supabase.from("game_rooms").update({ last_activity: now }).eq("id", roomCode.toUpperCase())
+      console.log("Player updated successfully:", updatedPlayer)
+
+      // Update room activity to trigger real-time updates
+      await supabase
+        .from("game_rooms")
+        .update({
+          last_activity: now,
+        })
+        .eq("id", roomCode.toUpperCase())
 
       // Return updated room
       return await this.getRoomSupabase(roomCode)

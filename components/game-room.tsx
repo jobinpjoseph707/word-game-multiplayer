@@ -114,6 +114,16 @@ export default function GameRoom({ roomCode, playerName, isAdmin, onLeave }: Gam
     return () => clearInterval(cleanupInterval)
   }, [isAdmin, room, roomCode, backendType])
 
+  // Add this useEffect to track room changes:
+  useEffect(() => {
+    if (room) {
+      console.log(
+        `Room updated: ${room.players.length} players`,
+        room.players.map((p) => p.name),
+      )
+    }
+  }, [room])
+
   const copyRoomCode = () => {
     navigator.clipboard.writeText(roomCode)
     toast({
@@ -303,8 +313,11 @@ export default function GameRoom({ roomCode, playerName, isAdmin, onLeave }: Gam
               </CardHeader>
               <CardContent>
                 <div className="space-y-2">
-                  {room.players.map((player) => (
-                    <div key={player.id} className="flex items-center justify-between p-2 bg-gray-50 rounded">
+                  {room.players.map((player, index) => (
+                    <div
+                      key={`${player.id}-${index}`}
+                      className="flex items-center justify-between p-2 bg-gray-50 rounded"
+                    >
                       <div className="flex items-center gap-2">
                         <span className="font-medium">{player.name}</span>
                         {player.is_admin && <Crown className="w-4 h-4 text-yellow-500" />}

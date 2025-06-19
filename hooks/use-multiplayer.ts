@@ -114,7 +114,7 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
             try {
               const supabase = getSupabaseClient()
 
-              // Subscribe to room changes
+              // Subscribe to room changes with better error handling
               const newSubscription = supabase
                 .channel(`room:${roomCode}`)
                 .on(
@@ -125,10 +125,12 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
                     table: "game_rooms",
                     filter: `id=eq.${roomCode.toUpperCase()}`,
                   },
-                  async () => {
+                  async (payload) => {
+                    console.log("Room change detected:", payload)
                     // Fetch the latest room data when changes occur
                     const updatedRoom = await GameStore.getRoom(roomCode)
                     if (isMounted && updatedRoom) {
+                      console.log("Updating room with", updatedRoom.players.length, "players")
                       setRoom(updatedRoom)
                     }
                   },
@@ -141,15 +143,25 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
                     table: "players",
                     filter: `room_id=eq.${roomCode.toUpperCase()}`,
                   },
-                  async () => {
+                  async (payload) => {
+                    console.log("Player change detected:", payload)
                     // Fetch the latest room data when player changes occur
                     const updatedRoom = await GameStore.getRoom(roomCode)
                     if (isMounted && updatedRoom) {
+                      console.log("Updating room with", updatedRoom.players.length, "players")
                       setRoom(updatedRoom)
                     }
                   },
                 )
-                .subscribe()
+                .subscribe((status) => {
+                  console.log("Subscription status:", status)
+                  if (status === "SUBSCRIBED") {
+                    console.log("Successfully subscribed to real-time updates")
+                  } else if (status === "CHANNEL_ERROR") {
+                    console.error("Subscription error, falling back to polling")
+                    setupPolling()
+                  }
+                })
 
               setSubscription(newSubscription)
               console.log("Supabase real-time subscription established")
@@ -193,14 +205,22 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
   }, [roomCode, playerName, isAdmin])
 
   const setupPolling = () => {
-    // Set up polling for room updates
+    // Set up polling for room updates with more frequent updates
     pollingInterval.current = setInterval(async () => {
       try {
         // Get latest room data
         const updatedRoom = await GameStore.getRoom(roomCode)
         if (isMounted) {
           if (updatedRoom) {
-            setRoom(updatedRoom)
+            // Only update if there are actual changes
+            if (
+              !room ||
+              room.players.length !== updatedRoom.players.length ||
+              JSON.stringify(room.players) !== JSON.stringify(updatedRoom.players)
+            ) {
+              console.log("Polling: Updating room with", updatedRoom.players.length, "players")
+              setRoom(updatedRoom)
+            }
           } else if (isConnected) {
             // Room was deleted or doesn't exist anymore
             setError("Room no longer exists")
@@ -210,7 +230,7 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
       } catch (err) {
         console.error("Polling error:", err)
       }
-    }, 2000) // Poll every 2 seconds
+    }, 1000) // Poll every 1 second for better responsiveness
   }
 
   // Update settings
@@ -248,6 +268,7 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
     try {
       // Generate words based on difficulty
       const { majorityWord, imposterWord } = generateWords(room.settings.difficulty)
+      console.log("Generated words:", { majorityWord, imposterWord })
 
       // Assign words to players
       const playerCount = room.players.length
@@ -256,7 +277,7 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
       // Create array of player indices
       const indices = Array.from({ length: playerCount }, (_, i) => i)
 
-      // Shuffle indices
+      // Shuffle indices using Fisher-Yates algorithm
       for (let i = indices.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1))
         ;[indices[i], indices[j]] = [indices[j], indices[i]]
@@ -264,30 +285,45 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
 
       // Select imposters
       const imposterIndices = indices.slice(0, imposterCount)
+      console.log("Imposter indices:", imposterIndices)
 
-      // Update players with words
-      const playerUpdates = room.players.map((player, index) => ({
-        id: player.id,
-        word: imposterIndices.includes(index) ? imposterWord : majorityWord,
-        clue: "",
-        votes: 0,
-        is_eliminated: false,
-        has_voted: false,
-      }))
+      // Update ALL players with words (including admin)
+      const playerUpdates = room.players.map((player, index) => {
+        const isImposter = imposterIndices.includes(index)
+        const assignedWord = isImposter ? imposterWord : majorityWord
+        console.log(
+          `Player ${player.name} (${player.id}) gets word: ${assignedWord} (${isImposter ? "imposter" : "majority"})`,
+        )
 
-      // Update each player
-      for (const player of playerUpdates) {
-        await GameStore.updatePlayer(roomCode, player.id, player)
+        return {
+          id: player.id,
+          word: assignedWord,
+          clue: "",
+          votes: 0,
+          is_eliminated: false,
+          has_voted: false,
+        }
+      })
+
+      // Update each player sequentially to ensure all get words
+      for (const playerUpdate of playerUpdates) {
+        const success = await GameStore.updatePlayer(roomCode, playerUpdate.id, playerUpdate)
+        if (!success) {
+          console.error(`Failed to update player ${playerUpdate.id}`)
+          return false
+        }
       }
 
       // Start game with countdown
       const updatedRoom = await GameStore.updateRoom(roomCode, {
         game_phase: "starting",
         time_left: 10, // 10 second countdown
+        current_player_index: 0, // Reset to first player
       } as any)
 
       if (updatedRoom) {
         setRoom(updatedRoom)
+        console.log("Game started successfully, all players should have words")
 
         // After countdown, move to clue phase
         setTimeout(async () => {
