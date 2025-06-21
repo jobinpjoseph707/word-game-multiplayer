@@ -399,13 +399,26 @@ export class GameStore {
         } else {
           // Player is still active, allow reconnection
           console.log(`Player reconnecting: ${trimmedName}`)
-          const now = new Date().toISOString()
+          const currentTime = new Date().toISOString()
 
-          await supabase.from("players").update({ last_seen: now }).eq("id", existingPlayer.id)
-          await supabase.from("game_rooms").update({ last_activity: now }).eq("id", upperRoomCode)
+          await supabase.from("players").update({ last_seen: currentTime }).eq("id", existingPlayer.id)
+          await supabase.from("game_rooms").update({ last_activity: currentTime }).eq("id", upperRoomCode)
+
+          // Fetch the latest room state to ensure fresh data is returned
+          const { data: refreshedRoom, error: refreshError } = await supabase
+            .from("game_rooms")
+            .select(`*, players (*)`)
+            .eq("id", upperRoomCode)
+            .single()
+
+          if (refreshError) {
+            console.error("Error refreshing room data on reconnect:", refreshError)
+            // Fallback to the room data fetched earlier, though it might be slightly stale
+            return { room: room, playerId: existingPlayer.id }
+          }
 
           return {
-            room: room,
+            room: refreshedRoom || room, // Prefer refreshedRoom, fallback if somehow null
             playerId: existingPlayer.id,
           }
         }
@@ -870,25 +883,5 @@ export class GameStore {
 
   static getBackendType(): string {
     return isSupabaseConfigured() ? "Supabase" : "In-Memory"
-  }
-
-  static async cleanupInactivePlayers(): Promise<void> {
-    if (!isSupabaseConfigured()) return
-
-    try {
-      const supabase = getSupabaseClient()
-      const cutoffTime = new Date(Date.now() - 2 * 60 * 1000).toISOString() // 2 minutes ago
-
-      // Remove players who haven't been seen for 2 minutes
-      const { error } = await supabase.from("players").delete().lt("last_seen", cutoffTime)
-
-      if (error) {
-        console.error("Cleanup error:", error)
-      } else {
-        console.log("Cleaned up inactive players")
-      }
-    } catch (error) {
-      console.error("Cleanup error:", error)
-    }
   }
 }

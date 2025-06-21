@@ -41,6 +41,7 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
   const connectionAttempted = useRef(false)
   const heartbeatInterval = useRef<NodeJS.Timeout | null>(null)
   const pollingInterval = useRef<NodeJS.Timeout | null>(null)
+  const heartbeatFailures = useRef(0) // Keep track of consecutive heartbeat failures
   let isMounted = true
 
   // Initialize connection
@@ -101,10 +102,20 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
 
           // Start heartbeat immediately
           heartbeatInterval.current = setInterval(async () => {
-            if (result.playerId) {
+            if (result.playerId && isMounted) {
               const success = await GameStore.heartbeat(result.playerId)
-              if (!success && isMounted) {
-                console.warn("Heartbeat failed, connection may be lost")
+              if (!success) {
+                heartbeatFailures.current++
+                console.warn(`Heartbeat failed (${heartbeatFailures.current} consecutive)`)
+                if (heartbeatFailures.current >= 3) {
+                  setError("Connection lost (heartbeat). Please try reconnecting.")
+                  setIsConnected(false)
+                  if (heartbeatInterval.current) clearInterval(heartbeatInterval.current)
+                  // Optionally, also clear polling if it's active due to an earlier fallback
+                  if (pollingInterval.current) clearInterval(pollingInterval.current)
+                }
+              } else {
+                heartbeatFailures.current = 0 // Reset on successful heartbeat
               }
             }
           }, 30000) // Send heartbeat every 30 seconds
@@ -157,8 +168,10 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
                   console.log("Subscription status:", status)
                   if (status === "SUBSCRIBED") {
                     console.log("Successfully subscribed to real-time updates")
+                    setError(""); // Clear any previous polling warning
                   } else if (status === "CHANNEL_ERROR") {
                     console.error("Subscription error, falling back to polling")
+                    setError("Real-time connection issue. Switched to fallback mode (slower updates).")
                     setupPolling()
                   }
                 })
@@ -307,30 +320,35 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
 
       // Update each player sequentially to ensure all get words
       for (const playerUpdate of playerUpdates) {
-        const success = await GameStore.updatePlayer(roomCode, playerUpdate.id, playerUpdate)
-        if (!success) {
-          console.error(`Failed to update player ${playerUpdate.id}`)
+        const playerUpdateResult = await GameStore.updatePlayer(roomCode, playerUpdate.id, playerUpdate)
+        if (!playerUpdateResult) {
+          console.error(`Failed to update player ${playerUpdate.id} during game start`)
+          setError("Error initializing player data for the game. Please try again.")
           return false
         }
       }
 
       // Start game with countdown
-      const updatedRoom = await GameStore.updateRoom(roomCode, {
+      const roomStateAfterStart = await GameStore.updateRoom(roomCode, {
         game_phase: "starting",
         time_left: 10, // 10 second countdown
         current_player_index: 0, // Reset to first player
       } as any)
 
-      if (updatedRoom) {
-        setRoom(updatedRoom)
+      if (roomStateAfterStart) {
+        setRoom(roomStateAfterStart)
         console.log("Game started successfully, all players should have words")
 
         // After countdown, move to clue phase
         setTimeout(async () => {
-          await GameStore.updateRoom(roomCode, {
-            game_phase: "clues",
-            time_left: 30, // 30 seconds per player to give clue
-          } as any)
+          // Ensure game is still in "starting" phase and admin is connected
+          const roomBeforeClues = await GameStore.getRoom(roomCode);
+          if (roomBeforeClues && roomBeforeClues.game_phase === "starting" && isConnected && room) {
+            await GameStore.updateRoom(roomCode, {
+              game_phase: "clues",
+              time_left: 30, // 30 seconds per player to give clue
+            } as any)
+          }
         }, 10000)
 
         return true
@@ -348,37 +366,96 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
       if (!room || !playerId || !isConnected) return false
 
       try {
-        // Update player's clue
-        await GameStore.updatePlayer(roomCode, playerId, { clue })
-
-        // Check if all players have submitted clues
-        const updatedRoom = await GameStore.getRoom(roomCode)
-        if (!updatedRoom) return false
-
-        const allCluesSubmitted = updatedRoom.players.every((p) => p.clue)
-
-        if (allCluesSubmitted) {
-          // Move to discussion phase
-          await GameStore.updateRoom(roomCode, {
-            game_phase: "discussion",
-            time_left: 60, // 60 seconds for discussion
-          } as any)
-
-          // After discussion, move to voting phase
-          setTimeout(async () => {
-            await GameStore.updateRoom(roomCode, {
-              game_phase: "voting",
-              time_left: 30, // 30 seconds for voting
-            } as any)
-          }, 60000)
-        } else {
-          // Move to next player
-          const nextPlayerIndex = (updatedRoom.current_player_index + 1) % updatedRoom.players.length
-          await GameStore.updateRoom(roomCode, {
-            current_player_index: nextPlayerIndex,
-          } as any)
+        // 1. Current player submits their clue
+        const playerUpdateSuccess = await GameStore.updatePlayer(roomCode, playerId, { clue })
+        if (!playerUpdateSuccess) {
+            setError("Failed to submit your clue. Please try again.")
+            return false;
         }
 
+        // 2. Fetch latest room state
+        let currentRoomState = await GameStore.getRoom(roomCode)
+        if (!currentRoomState) {
+          setError("Failed to fetch room state after submitting clue.")
+          return false
+        }
+        // 3. Update local room state
+        setRoom(currentRoomState)
+
+        // 4. Filter active players
+        const activePlayers = currentRoomState.players.filter(p => !p.is_eliminated)
+        if (activePlayers.length === 0 && currentRoomState.players.length > 0) {
+            // This case (no active players but players exist) should ideally be handled by game end logic elsewhere or implies all eliminated.
+            // If game should end, this might be a results transition. For now, assume it means no one can give clues.
+            console.warn("SubmitClue: No active players left to give clues.");
+            // Potentially transition to results or an error state if this is unexpected.
+            // For now, let's assume game end conditions are checked primarily after voting.
+            return true; // Or handle error/transition
+        }
+
+
+        // 5. Count active players who have a non-empty clue
+        const numberOfCluesGivenByActivePlayers = activePlayers.filter(p => p.clue && p.clue.trim() !== "").length
+
+        // 6. If all active players have given clues
+        if (numberOfCluesGivenByActivePlayers >= activePlayers.length) {
+          const discussionRoomState = await GameStore.updateRoom(roomCode, {
+            game_phase: "discussion",
+            time_left: 60, // 60 seconds for discussion
+            current_player_index: 0, // Reset index
+          } as any)
+          if (!discussionRoomState) {
+            setError("Failed to transition to discussion phase. Please try again.");
+            return false;
+          }
+          setRoom(discussionRoomState)
+
+          if (isAdmin) {
+            setTimeout(async () => {
+              const roomBeforeVotingCheck = await GameStore.getRoom(roomCode)
+              if (roomBeforeVotingCheck && roomBeforeVotingCheck.game_phase === "discussion" && isConnected && room) {
+                await GameStore.updateRoom(roomCode, {
+                  game_phase: "voting",
+                  time_left: 30,
+                } as any)
+              }
+            }, 60000) // 60 seconds
+          }
+        } else {
+          // 7. Still more clues needed; find next non-eliminated player
+          let nextActivePlayerIndex = -1;
+          let searchIndex = currentRoomState.current_player_index; // Start search from the player who just gave a clue (or was supposed to)
+
+          for (let i = 0; i < currentRoomState.players.length; i++) {
+            searchIndex = (searchIndex + 1) % currentRoomState.players.length;
+            if (!currentRoomState.players[searchIndex].is_eliminated) {
+              nextActivePlayerIndex = searchIndex;
+              break;
+            }
+          }
+
+          if (nextActivePlayerIndex === -1 && activePlayers.length > 0) {
+            // This should ideally not happen if numberOfCluesGivenByActivePlayers < activePlayers.length
+            // but as a fallback, try finding the first active player.
+            nextActivePlayerIndex = currentRoomState.players.findIndex(p => !p.is_eliminated);
+            if (nextActivePlayerIndex === -1) { // All players eliminated?
+                 console.error("SubmitClue: All players seem eliminated, but not all clues given. Game state inconsistent.");
+                 // Transition to results or error. For now, just prevent further action.
+                 return false;
+            }
+          }
+
+
+          const nextClueRoomState = await GameStore.updateRoom(roomCode, {
+            current_player_index: nextActivePlayerIndex,
+            time_left: 30, // Reset time for the next player's clue
+          } as any)
+          if (!nextClueRoomState) {
+            setError("Failed to set next player. Please try again.");
+            return false;
+          }
+          setRoom(nextClueRoomState)
+        }
         return true
       } catch (err) {
         console.error("Failed to submit clue:", err)
@@ -396,76 +473,170 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
       try {
         // Find the player being voted for
         const votedPlayer = room.players.find((p) => p.id === votedPlayerId)
-        if (!votedPlayer) return false
-
-        // Increment votes for the player
-        await GameStore.updatePlayer(roomCode, votedPlayerId, {
-          votes: (votedPlayer.votes || 0) + 1,
-        })
-
-        // Mark current player as having voted
-        await GameStore.updatePlayer(roomCode, playerId, {
-          has_voted: true,
-        } as any)
-
-        // Check if all players have voted
-        const updatedRoom = await GameStore.getRoom(roomCode)
-        if (!updatedRoom) return false
-
-        const allVoted = updatedRoom.players.every((p) => p.has_voted)
-
-        if (allVoted) {
-          // Find player with most votes
-          const mostVotedPlayer = updatedRoom.players.reduce(
-            (prev, current) => (prev.votes > current.votes ? prev : current),
-            { votes: -1 } as any,
-          )
-
-          // Eliminate player with most votes
-          await GameStore.updatePlayer(roomCode, mostVotedPlayer.id, {
-            is_eliminated: true,
-          })
-
-          // Reset votes for next round
-          for (const player of updatedRoom.players) {
-            await GameStore.updatePlayer(roomCode, player.id, {
-              votes: 0,
-              has_voted: false,
-            } as any)
-          }
-
-          // Check game end conditions
-          const eliminatedPlayers = updatedRoom.players.filter((p) => p.is_eliminated)
-          const activePlayers = updatedRoom.players.filter((p) => !p.is_eliminated)
-
-          // Get unique words
-          const words = [...new Set(updatedRoom.players.map((p) => p.word))]
-          const majorityWord = words[0] // Assuming first word is majority
-          const imposterWord = words.length > 1 ? words[1] : null
-
-          // Count active players with each word
-          const activeMajority = activePlayers.filter((p) => p.word === majorityWord).length
-          const activeImposters = imposterWord ? activePlayers.filter((p) => p.word === imposterWord).length : 0
-
-          // Game ends if all imposters eliminated or if imposters >= majority
-          const gameOver = activeImposters === 0 || activeImposters >= activeMajority
-
-          if (gameOver) {
-            // Move to results phase
-            await GameStore.updateRoom(roomCode, {
-              game_phase: "results",
-            } as any)
-          } else {
-            // Start next round
-            await GameStore.updateRoom(roomCode, {
-              round: updatedRoom.round + 1,
-              game_phase: "clues",
-              current_player_index: 0,
-              time_left: 30,
-            } as any)
-          }
+        if (!votedPlayer) {
+            setError("Selected player not found. Vote not registered."); // Should not happen typically
+            return false;
         }
 
+        // Increment votes for the player
+        const voteIncrementSuccess = await GameStore.updatePlayer(roomCode, votedPlayerId, {
+          votes: (votedPlayer.votes || 0) + 1,
+        })
+        if (!voteIncrementSuccess) {
+            setError("Failed to register your vote. Please try again.");
+            return false;
+        }
+
+        // Mark current player as having voted
+        const markVotedSuccess = await GameStore.updatePlayer(roomCode, playerId, {
+          has_voted: true,
+        } as any)
+        if (!markVotedSuccess) {
+            // This is less critical for the voter, but good to log or handle if needed.
+            // For now, we'll proceed as the vote itself was registered.
+            console.warn("Failed to mark player as voted, but vote was registered.");
+        }
+
+        // Fetch latest room state after player's vote is recorded.
+        let roomAfterVote = await GameStore.getRoom(roomCode)
+        if (!roomAfterVote) {
+            setError("Failed to fetch room state after voting.");
+            return false;
+        }
+        setRoom(roomAfterVote) // Update local state
+
+        const activePlayersInRoom = roomAfterVote.players.filter(p => !p.is_eliminated);
+        const nonVotedActivePlayers = activePlayersInRoom.filter(p => !p.has_voted).length;
+
+        if (nonVotedActivePlayers === 0) {
+          // All active players have voted. Proceed to tally.
+          let playerToEliminate: Player | undefined = undefined;
+          let maxVotes = -1;
+
+          // Determine who to eliminate among active players
+          // Consider only players who are not already eliminated
+          const candidatesForElimination = roomAfterVote.players.filter(p => !p.is_eliminated);
+
+          if (candidatesForElimination.length > 0) {
+            // Simple model: player with most votes is eliminated. Ties mean no one or first one.
+            // A more robust model might handle ties explicitly (e.g. revote, or random).
+            // Current logic: find one player with max votes.
+            playerToEliminate = candidatesForElimination.reduce((highestVoted, currentPlayer) => {
+                if ((currentPlayer.votes || 0) > (highestVoted.votes || 0)) {
+                    return currentPlayer;
+                }
+                // Basic tie-breaking: keep the one found first if votes are equal.
+                // Or, if you want to ensure some elimination, if votes are equal and positive,
+                // you might prefer the one earlier in the list or a random one.
+                // For simplicity, this picks one. If all have 0 votes, first player is picked.
+                return (currentPlayer.votes || 0) === (highestVoted.votes || 0) && (currentPlayer.votes || 0) === 0 ? highestVoted :
+                       (currentPlayer.votes || 0) > (highestVoted.votes || 0) ? currentPlayer : highestVoted;
+
+            }, candidatesForElimination[0]); // Initialize with the first candidate
+
+            // Ensure someone was actually voted for (at least 1 vote)
+            if (playerToEliminate && (playerToEliminate.votes || 0) > 0) {
+                const eliminationSuccess = await GameStore.updatePlayer(roomCode, playerToEliminate.id, { is_eliminated: true });
+                if (!eliminationSuccess) {
+                    setError("Failed to process elimination. Please try again or contact support.");
+                    return false;
+                }
+            } else {
+                console.log("No player received enough votes to be eliminated or tie with zero votes.");
+                // In a real game, might announce "No one was eliminated" and proceed to next round/game end check.
+                // For now, we proceed as if no one was eliminated this round if no positive votes.
+            }
+          }
+
+
+          // Reset votes and has_voted status for ALL players for the next round
+          for (const p of roomAfterVote.players) { // Use roomAfterVote.players
+            const resetSuccess = await GameStore.updatePlayer(roomCode, p.id, { votes: 0, has_voted: false });
+            if (!resetSuccess) {
+                // Log this, but don't necessarily stop the game flow if some resets fail.
+                console.warn(`Failed to reset votes/voted status for player ${p.id}`);
+            }
+          }
+
+          // --- Game End Condition Check ---
+          const roomAfterEliminationAndReset = await GameStore.getRoom(roomCode);
+          if (!roomAfterEliminationAndReset) {
+            setError("Failed to fetch room state after vote reset.");
+            return false;
+          }
+          setRoom(roomAfterEliminationAndReset);
+
+          const finalActivePlayers = roomAfterEliminationAndReset.players.filter(p => !p.is_eliminated);
+
+          let trueMajorityWord = "";
+          let trueImposterWord = "";
+          const wordCounts: { [key: string]: number } = {};
+          roomAfterEliminationAndReset.players.forEach(p => {
+            if (p.word) wordCounts[p.word] = (wordCounts[p.word] || 0) + 1;
+          });
+          const sortedWordsByOccurrence = Object.keys(wordCounts).sort((a, b) => wordCounts[b] - wordCounts[a]);
+
+          if (sortedWordsByOccurrence.length > 0) trueMajorityWord = sortedWordsByOccurrence[0];
+          if (sortedWordsByOccurrence.length > 1) trueImposterWord = sortedWordsByOccurrence[1];
+          else trueImposterWord = trueMajorityWord; // Only one type of word in game
+
+          const activeMajorityCount = finalActivePlayers.filter(p => p.word === trueMajorityWord).length;
+          const activeImposterCount = finalActivePlayers.filter(p => p.word === trueImposterWord).length;
+
+          // Game ends if all imposters are eliminated OR if imposters' count is >= majority's count (and majority isn't 0)
+          // OR if only one player (or type of player) remains.
+          let gameOver = false;
+          if (activeImposterCount === 0 && trueImposterWord !== "") { // All imposters gone
+            gameOver = true;
+          } else if (activeMajorityCount === 0 && trueMajorityWord !== "") { // All majority gone (imposters win)
+             gameOver = true;
+          } else if (finalActivePlayers.length <= roomAfterEliminationAndReset.settings.imposterCount && trueImposterWord !== "" && activeImposterCount > 0 ) {
+            // Imposters win if remaining players are less than or equal to initial imposter count (implies imposters have majority or equal)
+            // Ensure imposters are actually present.
+            gameOver = true;
+          } else if (activeImposterCount > 0 && activeMajorityCount <= activeImposterCount) { // Imposters win if they outnumber or equal majority
+            gameOver = true;
+          }
+
+
+          if (gameOver) {
+            const resultsUpdateSuccess = await GameStore.updateRoom(roomCode, { game_phase: "results" });
+            if (!resultsUpdateSuccess) {
+                setError("Failed to transition to results phase.");
+                // Game might be stuck, but returning true as vote processing part is done.
+                // Or return false to indicate overall failure. Let's make it return false.
+                return false;
+            }
+          } else {
+            // Start next round: reset clues for active players
+            for (const p of finalActivePlayers) { // Iterate over active players
+              const clueResetSuccess = await GameStore.updatePlayer(roomCode, p.id, { clue: "" });
+              if (!clueResetSuccess) {
+                  console.warn(`Failed to reset clue for player ${p.id} for next round.`);
+                  // Not critical enough to stop the game usually.
+              }
+            }
+
+            // Find first active player for the new round
+            let firstPlayerForNextRoundIndex = 0;
+            const firstActiveP = roomAfterEliminationAndReset.players.find(p => !p.is_eliminated);
+            if (firstActiveP) {
+                firstPlayerForNextRoundIndex = roomAfterEliminationAndReset.players.indexOf(firstActiveP);
+            }
+
+
+            await GameStore.updateRoom(roomCode, {
+              round: roomAfterEliminationAndReset.round + 1,
+              game_phase: "clues",
+              current_player_index: firstPlayerForNextRoundIndex,
+              time_left: 30,
+            });
+            if (!nextRoundUpdateSuccess) {
+                setError("Failed to start the next round.");
+                return false;
+            }
+          }
+        }
         return true
       } catch (err) {
         console.error("Failed to submit vote:", err)

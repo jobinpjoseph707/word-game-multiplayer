@@ -58,8 +58,8 @@ export default function GameRoom({ roomCode, playerName, isAdmin, onLeave }: Gam
   useEffect(() => {
     if (error) {
       toast({
-        title: "Connection Error",
-        description: error,
+        title: "Game Update Error", // More generic title
+        description: error, // The error message from useMultiplayer
         variant: "destructive",
       })
     }
