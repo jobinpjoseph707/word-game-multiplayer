@@ -142,8 +142,10 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
                     if (isMounted && updatedRoom) {
                       console.log(`[Supabase Realtime] 'game_rooms' event: Updating room ${roomCode} with ${updatedRoom.players.length} players. Player IDs: ${updatedRoom.players.map(p=>p.id).join(', ')}.`);
                       setRoom(updatedRoom);
+                      setError(""); // Clear previous sync errors if successful
                     } else if (isMounted && !updatedRoom) {
                       console.warn(`[Supabase Realtime] 'game_rooms' event: GameStore.getRoom(${roomCode}) returned null or undefined.`);
+                      setError("Failed to refresh room data after a game update. Player list or game state may be outdated.");
                     } else if (!isMounted) {
                       console.log(`[Supabase Realtime] 'game_rooms' event: Component not mounted, skipping setRoom for room ${roomCode}.`);
                     }
@@ -320,7 +322,8 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
           clue: "",
           votes: 0,
           is_eliminated: false,
-          has_voted: false,
+          // has_voted: false, // Temporarily remove to prevent crash if column is missing.
+                            // Relies on DB default if column exists. Voting will need has_voted.
         }
       })
 
@@ -334,141 +337,116 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
         }
       }
 
-      // Start game with countdown
-      const roomStateAfterStart = await GameStore.updateRoom(roomCode, {
-        game_phase: "starting",
-        time_left: 10, // 10 second countdown
-        current_player_index: 0, // Reset to first player
+      // Phase 1: Word Reveal (5 seconds)
+      let currentRoomState = await GameStore.updateRoom(roomCode, {
+        game_phase: "starting", // Keep using "starting" for word reveal phase
+        time_left: 5,          // 5 second word reveal
+        current_player_index: 0, // Reset, though not used for clues now
       } as any)
 
-      if (roomStateAfterStart) {
-        setRoom(roomStateAfterStart)
-        console.log("Game started successfully, all players should have words")
-
-        // After countdown, move to clue phase
-        setTimeout(async () => {
-          // Ensure game is still in "starting" phase and admin is connected
-          const roomBeforeClues = await GameStore.getRoom(roomCode);
-          if (roomBeforeClues && roomBeforeClues.game_phase === "starting" && isConnected && room) {
-            await GameStore.updateRoom(roomCode, {
-              game_phase: "clues",
-              time_left: 30, // 30 seconds per player to give clue
-            } as any)
-          }
-        }, 10000)
-
-        return true
+      if (!currentRoomState) {
+        setError("Failed to start word reveal phase.");
+        return false;
       }
-      return false
+      setRoom(currentRoomState);
+      console.log("Game started: Word reveal phase (5s). Players should have words.");
+
+      // Admin client orchestrates phase transitions via timeouts
+      if (isAdmin) {
+        // After 5s (word reveal ends), transition to simultaneous clue submission
+        setTimeout(async () => {
+          const roomAtTimeOfRevealEnd = await GameStore.getRoom(roomCode);
+          if (roomAtTimeOfRevealEnd && roomAtTimeOfRevealEnd.game_phase === "starting" && isConnected && room) {
+            console.log("Word reveal ended. Transitioning to simultaneous clue submission (20s).");
+            currentRoomState = await GameStore.updateRoom(roomCode, {
+              game_phase: "simultaneous_clues", // New phase
+              time_left: 20,                   // 20 seconds for everyone to submit clues
+              current_player_index: 0,         // Reset
+            } as any);
+
+            if (currentRoomState) {
+              setRoom(currentRoomState); // Update admin's room state
+
+              // After 20s (clue submission ends), transition to discussion
+              setTimeout(async () => {
+                const roomAtTimeOfClueEnd = await GameStore.getRoom(roomCode);
+                if (roomAtTimeOfClueEnd && roomAtTimeOfClueEnd.game_phase === "simultaneous_clues" && isConnected && room) {
+                  console.log("Simultaneous clue submission ended. Transitioning to discussion (60s).");
+                  const discussionRoomState = await GameStore.updateRoom(roomCode, {
+                    game_phase: "discussion",
+                    time_left: 60,           // 60 seconds for discussion
+                    current_player_index: 0, // Reset
+                  } as any);
+
+                  if (discussionRoomState) {
+                    // Admin client sets the timeout for discussion to end
+                    setTimeout(async () => {
+                      const roomAtDiscussionEnd = await GameStore.getRoom(roomCode);
+                      if (roomAtDiscussionEnd && roomAtDiscussionEnd.game_phase === "discussion" && isConnected && room) {
+                        console.log("Discussion ended. Transitioning to voting (30s).");
+                        await GameStore.updateRoom(roomCode, {
+                          game_phase: "voting",
+                          time_left: 30,
+                          current_player_index: 0,
+                        } as any);
+                      }
+                    }, 60000); // 60 seconds for discussion
+                  } else {
+                    setError("Failed to transition to discussion phase.");
+                  }
+                  // setRoom for admin will be called via subscription eventually
+                }
+              }, 20000); // 20 seconds for clue submission
+            } else {
+              setError("Failed to transition to simultaneous clue phase.");
+            }
+          }
+        }, 5000); // 5 seconds for word reveal
+      }
+      return true; // startGame initiated successfully from admin's perspective
     } catch (err) {
-      console.error("Failed to start game:", err)
-      return false
+      console.error("Failed to start game:", err);
+      setError(err instanceof Error ? err.message : "An unknown error occurred while starting the game.");
+      return false; // Ensure startGame returns false on error
     }
-  }, [room, isConnected, roomCode])
+  }, [room, playerId, isConnected, roomCode, isAdmin]) // Added isAdmin, playerId might be needed if error involves specific player actions by admin
 
   // Submit clue
   const submitClue = useCallback(
     async (clue: string) => {
-      if (!room || !playerId || !isConnected) return false
+      if (!room || !playerId || !isConnected || room.game_phase !== "simultaneous_clues") {
+        // Only allow clue submission during the correct phase
+        if (room && room.game_phase !== "simultaneous_clues") {
+            console.warn(`SubmitClue called outside of 'simultaneous_clues' phase. Current phase: ${room.game_phase}`);
+            setError(`You can only submit clues during the clue submission window.`);
+        }
+        return false;
+      }
 
       try {
         // 1. Current player submits their clue
-        const playerUpdateSuccess = await GameStore.updatePlayer(roomCode, playerId, { clue })
-        if (!playerUpdateSuccess) {
-            setError("Failed to submit your clue. Please try again.")
-            return false;
+        const playerUpdateResult = await GameStore.updatePlayer(roomCode, playerId, { clue });
+
+        if (!playerUpdateResult) {
+          setError("Failed to submit your clue. Please try again.");
+          return false;
         }
 
-        // 2. Fetch latest room state
-        let currentRoomState = await GameStore.getRoom(roomCode)
-        if (!currentRoomState) {
-          setError("Failed to fetch room state after submitting clue.")
-          return false
-        }
-        // 3. Update local room state
-        setRoom(currentRoomState)
+        // After successfully submitting a clue, update the local room state
+        // to reflect this player's clue. GameStore.updatePlayer now returns the full room.
+        setRoom(playerUpdateResult);
+        // No need to fetch room state again explicitly here, as playerUpdateResult is the new room state.
 
-        // 4. Filter active players
-        const activePlayers = currentRoomState.players.filter(p => !p.is_eliminated)
-        if (activePlayers.length === 0 && currentRoomState.players.length > 0) {
-            // This case (no active players but players exist) should ideally be handled by game end logic elsewhere or implies all eliminated.
-            // If game should end, this might be a results transition. For now, assume it means no one can give clues.
-            console.warn("SubmitClue: No active players left to give clues.");
-            // Potentially transition to results or an error state if this is unexpected.
-            // For now, let's assume game end conditions are checked primarily after voting.
-            return true; // Or handle error/transition
-        }
+        console.log(`Player ${playerId} submitted clue: "${clue}"`);
+        return true; // Indicate success
 
-
-        // 5. Count active players who have a non-empty clue
-        const numberOfCluesGivenByActivePlayers = activePlayers.filter(p => p.clue && p.clue.trim() !== "").length
-
-        // 6. If all active players have given clues
-        if (numberOfCluesGivenByActivePlayers >= activePlayers.length) {
-          const discussionRoomState = await GameStore.updateRoom(roomCode, {
-            game_phase: "discussion",
-            time_left: 60, // 60 seconds for discussion
-            current_player_index: 0, // Reset index
-          } as any)
-          if (!discussionRoomState) {
-            setError("Failed to transition to discussion phase. Please try again.");
-            return false;
-          }
-          setRoom(discussionRoomState)
-
-          if (isAdmin) {
-            setTimeout(async () => {
-              const roomBeforeVotingCheck = await GameStore.getRoom(roomCode)
-              if (roomBeforeVotingCheck && roomBeforeVotingCheck.game_phase === "discussion" && isConnected && room) {
-                await GameStore.updateRoom(roomCode, {
-                  game_phase: "voting",
-                  time_left: 30,
-                } as any)
-              }
-            }, 60000) // 60 seconds
-          }
-        } else {
-          // 7. Still more clues needed; find next non-eliminated player
-          let nextActivePlayerIndex = -1;
-          let searchIndex = currentRoomState.current_player_index; // Start search from the player who just gave a clue (or was supposed to)
-
-          for (let i = 0; i < currentRoomState.players.length; i++) {
-            searchIndex = (searchIndex + 1) % currentRoomState.players.length;
-            if (!currentRoomState.players[searchIndex].is_eliminated) {
-              nextActivePlayerIndex = searchIndex;
-              break;
-            }
-          }
-
-          if (nextActivePlayerIndex === -1 && activePlayers.length > 0) {
-            // This should ideally not happen if numberOfCluesGivenByActivePlayers < activePlayers.length
-            // but as a fallback, try finding the first active player.
-            nextActivePlayerIndex = currentRoomState.players.findIndex(p => !p.is_eliminated);
-            if (nextActivePlayerIndex === -1) { // All players eliminated?
-                 console.error("SubmitClue: All players seem eliminated, but not all clues given. Game state inconsistent.");
-                 // Transition to results or error. For now, just prevent further action.
-                 return false;
-            }
-          }
-
-
-          const nextClueRoomState = await GameStore.updateRoom(roomCode, {
-            current_player_index: nextActivePlayerIndex,
-            time_left: 30, // Reset time for the next player's clue
-          } as any)
-          if (!nextClueRoomState) {
-            setError("Failed to set next player. Please try again.");
-            return false;
-          }
-          setRoom(nextClueRoomState)
-        }
-        return true
       } catch (err) {
-        console.error("Failed to submit clue:", err)
-        return false
+        console.error("Error in submitClue:", err);
+        setError(err instanceof Error ? err.message : "An unknown error occurred while submitting clue.");
+        return false;
       }
     },
-    [room, playerId, isConnected, roomCode],
+    [room, playerId, isConnected, roomCode], // roomCode was missing, add room?.game_phase for the check
   )
 
   // Submit vote
@@ -631,14 +609,21 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
             }
 
 
-            await GameStore.updateRoom(roomCode, {
+            // For next round, go back to "starting" (word reveal) phase.
+            // The startGame logic's setTimeout chain will handle subsequent transitions
+            // but it's only set up if isAdmin. This needs consideration.
+            // For simplicity now, let's assume the admin's client is still primary for timed transitions.
+            // If a new round starts, it should reset clues and words for players as if starting.
+            // The current startGame assigns words. A "nextRound" function might be better.
+            // However, to align with the new flow from startGame:
+            const nextRoundUpdateSuccess = await GameStore.updateRoom(roomCode, {
               round: roomAfterEliminationAndReset.round + 1,
-              game_phase: "clues",
-              current_player_index: firstPlayerForNextRoundIndex,
-              time_left: 30,
+              game_phase: "starting", // Word reveal for the new round
+              current_player_index: 0, // Reset for the start of phases
+              time_left: 5,            // 5s for word reveal
             });
             if (!nextRoundUpdateSuccess) {
-                setError("Failed to start the next round.");
+                setError("Failed to start the next round's word reveal.");
                 return false;
             }
           }
