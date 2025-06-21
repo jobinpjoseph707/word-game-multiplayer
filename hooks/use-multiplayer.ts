@@ -273,8 +273,9 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
   const startGame = useCallback(async () => {
     if (!room || !isConnected) return false
 
-    // Need at least 3 players
-    if (room.players.length < 3) {
+    // Need at least 2 players (new requirement)
+    if (room.players.length < 2) {
+      setError("At least 2 players are required to start the game."); // Also set error for more feedback
       return false
     }
 
