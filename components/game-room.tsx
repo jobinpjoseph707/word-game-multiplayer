@@ -577,12 +577,13 @@ export default function GameRoom({ roomCode, playerName, isAdmin, onLeave }: Gam
               <h2 className="text-2xl font-bold">Discussion Time</h2>
               <p className="text-gray-600">Discuss the clues and decide who to vote for</p>
             </div>
-            <div className="flex items-center gap-4">
+            {/* Timer display removed for discussion phase as it's not strictly timed out by a countdown now */}
+            {/* <div className="flex items-center gap-4">
               <div className="flex items-center gap-2">
                 <Clock className="w-4 h-4" />
                 <span className="font-mono text-lg">{timeLeft}s</span>
               </div>
-            </div>
+            </div> */}
           </div>
 
           {/* All Clues */}
@@ -634,12 +635,40 @@ export default function GameRoom({ roomCode, playerName, isAdmin, onLeave }: Gam
             </CardContent>
           </Card>
 
-          <div className="text-center">
-            <Button onClick={() => {}} size="lg">
-              <Vote className="w-4 h-4 mr-2" />
-              Ready to Vote
-            </Button>
-          </div>
+          {/* Player Ready Status & Action Button */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Player Readiness</CardTitle>
+              <CardDescription>
+                {room.players.filter(p => !p.is_eliminated && p.is_ready_to_vote).length} / {room.players.filter(p => !p.is_eliminated).length} players are ready to vote.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2 mb-4">
+                {room.players.filter(p => !p.is_eliminated).map(player => (
+                  <div key={player.id} className={`flex items-center justify-between p-2 rounded ${player.is_ready_to_vote ? "bg-green-100" : "bg-gray-100"}`}>
+                    <span className="font-medium">{player.name}{player.id === playerId ? " (You)" : ""}</span>
+                    {player.is_ready_to_vote ? (
+                      <Badge variant="default" className="bg-green-500 text-white">Ready</Badge>
+                    ) : (
+                      <Badge variant="outline">Not Ready</Badge>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {!myPlayer?.is_eliminated && (
+                <Button
+                  onClick={playerReadyToVote}
+                  size="lg"
+                  className="w-full"
+                  disabled={myPlayer?.is_ready_to_vote === true}
+                >
+                  <Vote className="w-4 h-4 mr-2" />
+                  {myPlayer?.is_ready_to_vote === true ? "Waiting for others..." : "I'm Ready to Vote"}
+                </Button>
+              )}
+            </CardContent>
+          </Card>
         </div>
       </div>
     )
@@ -855,7 +884,13 @@ export default function GameRoom({ roomCode, playerName, isAdmin, onLeave }: Gam
           </Card>
 
           {/* Actions */}
-          <div className="flex justify-center gap-4">
+          <div className="flex justify-center gap-4 mt-6">
+            {isAdmin && (
+              <Button onClick={restartGame} size="lg" className="bg-blue-600 hover:bg-blue-700 text-white">
+                <RefreshCw className="w-4 h-4 mr-2" />
+                Play Again
+              </Button>
+            )}
             <Button variant="outline" onClick={handleLeave} size="lg">
               Leave Game
             </Button>
