@@ -568,41 +568,56 @@ export class GameStore {
     try {
       const supabase = getSupabaseClient()
       const now = new Date().toISOString()
+      const updatePayload = { ...updates, last_seen: now };
 
-      console.log(`Updating player ${playerId} with:`, updates)
+      console.log(`[GameStore.updatePlayerSupabase] Attempting to update player ${playerId} in room ${roomCode.toUpperCase()} with payload:`, JSON.stringify(updatePayload));
 
       // Update player
       const { data: updatedPlayer, error: playerError } = await supabase
         .from("players")
-        .update({
-          ...updates,
-          last_seen: now,
-        })
+        .update(updatePayload)
         .eq("id", playerId)
         .eq("room_id", roomCode.toUpperCase())
         .select()
         .single()
 
       if (playerError) {
-        console.error("Update player error:", playerError)
-        throw new Error(`Failed to update player: ${playerError.message}`)
+        console.error(`[GameStore.updatePlayerSupabase] Supabase error updating player ${playerId} in room ${roomCode.toUpperCase()}:`, playerError);
+        throw new Error(`Failed to update player ${playerId}: ${playerError.message}`);
       }
 
-      console.log("Player updated successfully:", updatedPlayer)
+      if (!updatedPlayer) {
+        console.error(`[GameStore.updatePlayerSupabase] Player ${playerId} in room ${roomCode.toUpperCase()} not found or RLS prevented SELECT after update. Update payload was:`, JSON.stringify(updatePayload));
+        // This case will lead to the function returning null due to the outer catch or if not caught, an issue.
+        // Forcing a return null here makes it explicit.
+        return null;
+      }
+      console.log(`[GameStore.updatePlayerSupabase] Player ${playerId} DB update successful. Supabase returned:`, JSON.stringify(updatedPlayer));
 
       // Update room activity to trigger real-time updates
-      await supabase
+      const { error: roomActivityError } = await supabase
         .from("game_rooms")
-        .update({
-          last_activity: now,
-        })
-        .eq("id", roomCode.toUpperCase())
+        .update({ last_activity: now })
+        .eq("id", roomCode.toUpperCase());
+
+      if (roomActivityError) {
+        console.warn(`[GameStore.updatePlayerSupabase] Failed to update room last_activity for ${roomCode.toUpperCase()} after player update (player ${playerId}):`, roomActivityError);
+        // Non-critical for the success of updatePlayer, but good to know.
+      }
 
       // Return updated room
-      return await this.getRoomSupabase(roomCode)
+      console.log(`[GameStore.updatePlayerSupabase] Attempting to fetch final room state for room ${roomCode.toUpperCase()} after updating player ${playerId}.`);
+      const finalRoomState = await this.getRoomSupabase(roomCode);
+      if (!finalRoomState) {
+        console.error(`[GameStore.updatePlayerSupabase] getRoomSupabase returned null after successfully updating player ${playerId} in room ${roomCode.toUpperCase()}.`);
+        return null;
+      }
+      console.log(`[GameStore.updatePlayerSupabase] Successfully fetched final room state for room ${roomCode.toUpperCase()}. Player count: ${finalRoomState.players.length}.`);
+      return finalRoomState;
     } catch (error) {
-      console.error("Update player error:", error)
-      throw error
+      console.error(`[GameStore.updatePlayerSupabase] Outer catch for player ${playerId}, room ${roomCode.toUpperCase()}. Error:`, error);
+      // Ensure this path returns null as expected by useMultiplayer if an error is thrown and caught here.
+      return null;
     }
   }
 
