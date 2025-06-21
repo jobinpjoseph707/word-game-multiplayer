@@ -65,6 +65,21 @@ export default function GameRoom({ roomCode, playerName, isAdmin, onLeave }: Gam
     }
   }, [error, toast])
 
+  // Auto-adjust imposter count if totalPlayers changes making current imposterCount invalid
+  useEffect(() => {
+    if (isAdmin && room) {
+      const currentTotalPlayers = room.settings.totalPlayers;
+      const currentImposterCount = room.settings.imposterCount;
+      const maxAllowedImposters = Math.max(1, Math.floor(currentTotalPlayers / 2));
+
+      if (currentImposterCount > maxAllowedImposters) {
+        updateSettings({ imposterCount: maxAllowedImposters });
+      } else if (currentImposterCount < 1 && currentTotalPlayers >=2) { // Ensure at least 1 imposter if possible
+        updateSettings({ imposterCount: 1 });
+      }
+    }
+  }, [isAdmin, room?.settings.totalPlayers, room?.settings.imposterCount, updateSettings]);
+
   // Timer logic
   useEffect(() => {
     if (room && room.time_left > 0) {
@@ -118,9 +133,12 @@ export default function GameRoom({ roomCode, playerName, isAdmin, onLeave }: Gam
   useEffect(() => {
     if (room) {
       console.log(
-        `Room updated: ${room.players.length} players`,
-        room.players.map((p) => p.name),
-      )
+        `GameRoom UI: Room updated. Players: ${room.players.length}`,
+        room.players.map((p) => ({ id: p.id, name: p.name, admin: p.is_admin, word: p.word, clue: p.clue, votes: p.votes, eliminated: p.is_eliminated })),
+        `Phase: ${room.game_phase}`,
+        `CurrentPlayerIndex: ${room.current_player_index}`,
+        `TimeLeft: ${room.time_left}`
+      );
     }
   }, [room])
 
@@ -133,14 +151,12 @@ export default function GameRoom({ roomCode, playerName, isAdmin, onLeave }: Gam
   }
 
   const handleStartGame = async () => {
-    const success = await startGame()
-    if (!success && room && room.players.length < 3) {
-      toast({
-        title: "Need more players",
-        description: "At least 3 players are required to start",
-        variant: "destructive",
-      })
-    }
+    // `startGame` (from useMultiplayer) now calls `setError` if there are not enough players.
+    // The generic error handler in this component (useEffect on `error` prop from useMultiplayer)
+    // will display this error message via a toast.
+    // Therefore, the specific toast here for player count is redundant.
+    await startGame();
+    // If `startGame` returns `false` and sets an error, the generic toast will handle it.
   }
 
   const handleSubmitClue = async () => {
@@ -329,10 +345,10 @@ export default function GameRoom({ roomCode, playerName, isAdmin, onLeave }: Gam
                   ))}
                 </div>
 
-                {room.players.length < 3 && (
+                {room.players.length < 2 && (
                   <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
                     <p className="text-sm text-yellow-800">
-                      Need at least 3 players to start the game. Share the room code with your friends!
+                      Need at least 2 players to start the game. Share the room code with your friends!
                     </p>
                   </div>
                 )}
@@ -359,11 +375,11 @@ export default function GameRoom({ roomCode, playerName, isAdmin, onLeave }: Gam
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="4">4 Players</SelectItem>
-                        <SelectItem value="5">5 Players</SelectItem>
-                        <SelectItem value="6">6 Players</SelectItem>
-                        <SelectItem value="7">7 Players</SelectItem>
-                        <SelectItem value="8">8 Players</SelectItem>
+                        {[...Array(19)].map((_, i) => (
+                          <SelectItem key={i + 2} value={(i + 2).toString()}>
+                            {i + 2} Players
+                          </SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
                   </div>
@@ -372,15 +388,25 @@ export default function GameRoom({ roomCode, playerName, isAdmin, onLeave }: Gam
                     <Label>Imposters</Label>
                     <Select
                       value={room.settings.imposterCount.toString()}
-                      onValueChange={(value) => updateSettings({ imposterCount: Number.parseInt(value) })}
+                      onValueChange={(value) => {
+                        const newImposterCount = Number.parseInt(value);
+                        const maxImposters = Math.max(1, Math.floor(room.settings.totalPlayers / 2));
+                        // Only update if the selected value is valid for the current settings
+                        if (newImposterCount >= 1 && newImposterCount <= maxImposters) {
+                          updateSettings({ imposterCount: newImposterCount });
+                        }
+                        // The useEffect will handle adjustments if totalPlayers made current selection invalid
+                      }}
                     >
                       <SelectTrigger>
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="1">1 Imposter</SelectItem>
-                        <SelectItem value="2">2 Imposters</SelectItem>
-                        <SelectItem value="3">3 Imposters</SelectItem>
+                        {[...Array(Math.max(1, Math.floor(room.settings.totalPlayers / 2)))].map((_, i) => (
+                          <SelectItem key={i + 1} value={(i + 1).toString()}>
+                            {i + 1} Imposter{i + 1 > 1 ? 's' : ''}
+                          </SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
                   </div>
@@ -402,7 +428,7 @@ export default function GameRoom({ roomCode, playerName, isAdmin, onLeave }: Gam
                     </Select>
                   </div>
 
-                  <Button onClick={handleStartGame} className="w-full" disabled={room.players.length < 3}>
+                  <Button onClick={handleStartGame} className="w-full" disabled={room.players.length < 2}>
                     <Play className="w-4 h-4 mr-2" />
                     Start Game
                   </Button>

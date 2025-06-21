@@ -249,8 +249,8 @@ export class GameStore {
         .insert({
           id: upperRoomCode,
           settings: {
-            totalPlayers: 6,
-            imposterCount: 2,
+            totalPlayers: 4, // Updated default
+            imposterCount: 1, // Sensible default for 4 players
             difficulty: "easy",
             roundTime: 10,
           },
@@ -703,8 +703,8 @@ export class GameStore {
         },
       ],
       settings: {
-        totalPlayers: 6,
-        imposterCount: 2,
+        totalPlayers: 4, // Updated default
+        imposterCount: 1, // Sensible default for 4 players
         difficulty: "easy",
         roundTime: 10,
       },
