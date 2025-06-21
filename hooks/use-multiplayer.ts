@@ -28,6 +28,7 @@ interface Player {
   votes: number
   is_eliminated?: boolean
   has_voted?: boolean
+  is_ready_to_vote?: boolean; // New field for discussion phase
 }
 
 export function useMultiplayer(roomCode: string, playerName: string, isAdmin: boolean) {
@@ -371,30 +372,20 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
               setTimeout(async () => {
                 const roomAtTimeOfClueEnd = await GameStore.getRoom(roomCode);
                 if (roomAtTimeOfClueEnd && roomAtTimeOfClueEnd.game_phase === "simultaneous_clues" && isConnected && room) {
-                  console.log("Simultaneous clue submission ended. Transitioning to discussion (60s).");
+                  console.log("Simultaneous clue submission ended. Transitioning to discussion (20s)."); // Log updated
                   const discussionRoomState = await GameStore.updateRoom(roomCode, {
                     game_phase: "discussion",
-                    time_left: 60,           // 60 seconds for discussion
+                    time_left: 0, // No specific timer for discussion phase, it ends when players are ready
+                                   // Or set a very long default display timer if needed: e.g., 999
                     current_player_index: 0, // Reset
                   } as any);
 
-                  if (discussionRoomState) {
-                    // Admin client sets the timeout for discussion to end
-                    setTimeout(async () => {
-                      const roomAtDiscussionEnd = await GameStore.getRoom(roomCode);
-                      if (roomAtDiscussionEnd && roomAtDiscussionEnd.game_phase === "discussion" && isConnected && room) {
-                        console.log("Discussion ended. Transitioning to voting (30s).");
-                        await GameStore.updateRoom(roomCode, {
-                          game_phase: "voting",
-                          time_left: 30,
-                          current_player_index: 0,
-                        } as any);
-                      }
-                    }, 60000); // 60 seconds for discussion
-                  } else {
+                  if (!discussionRoomState) {
                     setError("Failed to transition to discussion phase.");
                   }
-                  // setRoom for admin will be called via subscription eventually
+                  // No automatic timeout to end discussion here anymore.
+                  // Transition to voting will be handled by playerReadyToVote logic.
+                  // Admin's setRoom will be called via subscription for the discussion phase change.
                 }
               }, 20000); // 20 seconds for clue submission
             } else {
@@ -648,6 +639,125 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
     }
   }, [playerId, roomCode])
 
+  const playerReadyToVote = useCallback(async () => {
+    if (!room || !playerId || !isConnected || room.game_phase !== "discussion") {
+      console.warn("playerReadyToVote called at inappropriate time.", { phase: room?.game_phase, playerId });
+      return false;
+    }
+
+    try {
+      // 1. Update current player's status
+      let updatedRoomState = await GameStore.updatePlayer(roomCode, playerId, { is_ready_to_vote: true });
+      if (!updatedRoomState) {
+        setError("Failed to set your status to 'Ready to Vote'. Please try again.");
+        return false;
+      }
+      setRoom(updatedRoomState); // Reflect own status change immediately
+
+      // 2. Check if all active, non-eliminated players are ready
+      const activePlayers = updatedRoomState.players.filter(p => !p.is_eliminated);
+      const allReady = activePlayers.every(p => p.is_ready_to_vote === true);
+
+      if (allReady && activePlayers.length > 0) { // Ensure there are active players
+        console.log("All active players are ready to vote. Transitioning to voting phase.");
+
+        // Reset is_ready_to_vote for all players for the next round (if any)
+        // This should be done carefully, perhaps as part of phase transition or new round setup.
+        // For now, let's do it before transitioning to voting.
+        for (const p of updatedRoomState.players) {
+          // We only need to reset if they were true. No need to update if already false/undefined.
+          if (p.is_ready_to_vote) {
+            await GameStore.updatePlayer(roomCode, p.id, { is_ready_to_vote: false });
+          }
+        }
+
+        // Fetch the state again after resetting is_ready_to_vote, though it might not be strictly necessary
+        // if the next updateRoom call for phase transition overwrites it.
+        // However, GameStore.updateRoom for phase change will trigger subscriptions for all.
+
+        const finalRoomStateBeforeVote = await GameStore.updateRoom(roomCode, {
+          game_phase: "voting",
+          time_left: 10, // 10 seconds for voting phase timer display
+          current_player_index: 0, // Reset for voting phase if needed by UI, or first active voter
+        } as any);
+
+        if (!finalRoomStateBeforeVote) {
+          setError("Failed to transition to voting phase.");
+          return false;
+        }
+        // setRoom will be called by subscription for all clients.
+      }
+      return true;
+    } catch (err) {
+      console.error("Error in playerReadyToVote:", err);
+      setError(err instanceof Error ? err.message : "An error occurred while setting ready status.");
+      return false;
+    }
+  }, [room, playerId, isConnected, roomCode, isAdmin]);
+
+
+  const restartGame = useCallback(async () => {
+    if (!room || !playerId || !isConnected || !isAdmin || room.game_phase !== "results") {
+      console.warn("restartGame called at inappropriate time or by non-admin.", {
+        phase: room?.game_phase,
+        isAdmin,
+        playerId
+      });
+      setError("Only the admin can restart the game from the results screen.");
+      return false;
+    }
+
+    try {
+      console.log(`Admin ${playerId} is restarting the game in room ${roomCode}.`);
+
+      // 1. Reset individual player states
+      for (const p of room.players) {
+        const playerResetSuccess = await GameStore.updatePlayer(roomCode, p.id, {
+          word: "",
+          clue: "",
+          votes: 0,
+          is_eliminated: false,
+          has_voted: false,      // Assuming has_voted column exists
+          is_ready_to_vote: false, // Reset ready status
+          // score: 0, // Optionally reset score, or keep it cumulative
+        });
+        if (!playerResetSuccess) {
+          // Log error but try to continue resetting other players and room
+          console.error(`Failed to reset player ${p.id} for new game.`);
+          // Potentially collect errors and report a more general one if many fail
+        }
+      }
+
+      // 2. Reset room state to lobby
+      // Important: Fetch the room state *after* player updates if those updates return the room state,
+      // or ensure this updateRoom call is the definitive one that clients will sync to for the lobby.
+      // Since updatePlayer returns the room state, the final call to updateRoom is primary.
+      const lobbyRoomState = await GameStore.updateRoom(roomCode, {
+        game_phase: "lobby",
+        round: 1,
+        current_player_index: 0,
+        time_left: 0,
+        // Settings (totalPlayers, imposterCount, difficulty) are preserved
+      } as any);
+
+      if (!lobbyRoomState) {
+        setError("Failed to restart the game and return to lobby. Please try again.");
+        return false;
+      }
+
+      // The admin's client will update its room state via subscription like other clients.
+      // No explicit setRoom(lobbyRoomState) needed here for the admin,
+      // as the GameStore.updateRoom should trigger subscriptions for all.
+      console.log(`Game room ${roomCode} reset to lobby.`);
+      return true;
+
+    } catch (err) {
+      console.error("Error in restartGame:", err);
+      setError(err instanceof Error ? err.message : "An error occurred while restarting the game.");
+      return false;
+    }
+  }, [room, playerId, isConnected, roomCode, isAdmin]);
+
   // Retry connection
   const retry = useCallback(() => {
     connectionAttempted.current = false
@@ -670,6 +780,8 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
     leaveRoom,
     retry,
     backendType,
+    playerReadyToVote,
+    restartGame, // New function for Play Again
   }
 }
 
