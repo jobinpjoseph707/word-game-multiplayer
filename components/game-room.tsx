@@ -490,102 +490,82 @@ export default function GameRoom({ roomCode, playerName, isAdmin, onLeave }: Gam
     )
   }
 
-  if (room.game_phase === "clues") {
-    const isMyTurn = currentPlayer?.id === playerId
+  // New "Simultaneous Clues" Phase
+  if (room.game_phase === "simultaneous_clues") {
+    const alreadySubmittedClue = myPlayer?.clue && myPlayer.clue.trim() !== "";
 
     return (
-      <div className="min-h-screen bg-gradient-to-br from-purple-50 to-pink-100 p-4">
-        <div className="max-w-4xl mx-auto space-y-6">
+      <div className="min-h-screen bg-gradient-to-br from-teal-50 to-cyan-100 p-4">
+        <div className="max-w-2xl mx-auto space-y-6">
           {/* Header */}
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-2xl font-bold">Giving Clues - Round {room.round}</h2>
-              <p className="text-gray-600">Each player gives one clue about their word</p>
-            </div>
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-2">
-                <Clock className="w-4 h-4" />
-                <span className="font-mono text-lg">{timeLeft}s</span>
-              </div>
-              <Badge>Your word: {myPlayer?.word}</Badge>
+          <div className="text-center space-y-2">
+            <h2 className="text-3xl font-bold text-gray-800">Submit Your Clue!</h2>
+            <p className="text-gray-600">Round {room.round} - Everyone submits their clue now.</p>
+            <div className="flex items-center justify-center gap-2 text-2xl font-mono text-teal-600">
+              <Clock className="w-7 h-7" />
+              <span>{timeLeft}s remaining</span>
             </div>
           </div>
 
-          {/* Progress */}
-          <div className="space-y-2">
-            <div className="flex justify-between text-sm">
-              <span>Progress</span>
-              <span>
-                {room.current_player_index + 1} / {room.players.length}
-              </span>
-            </div>
-            <Progress value={((room.current_player_index + 1) / room.players.length) * 100} />
-          </div>
-
-          {/* Current Turn */}
-          <Card>
+          {/* Clue Input Card */}
+          <Card className="shadow-lg">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
-                <MessageCircle className="w-5 h-5" />
-                {isMyTurn ? "Your Turn!" : `${currentPlayer?.name}'s Turn`}
+                <MessageCircle className="w-6 h-6 text-teal-700" />
+                Your Clue for: <strong className="text-teal-700">{myPlayer?.word || "your word"}</strong>
               </CardTitle>
+              <p className="text-sm text-gray-500">Enter a single word clue. Try to be clever!</p>
             </CardHeader>
             <CardContent>
-              {isMyTurn ? (
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <Label>
-                      Give a one-word clue about: <strong>{myPlayer?.word}</strong>
-                    </Label>
-                    <Input
-                      placeholder="Enter your clue..."
-                      value={currentClue}
-                      onChange={(e) => setCurrentClue(e.target.value)}
-                      maxLength={20}
-                      onKeyPress={(e) => e.key === "Enter" && handleSubmitClue()}
-                    />
-                  </div>
-                  <Button onClick={handleSubmitClue} disabled={!currentClue.trim()}>
-                    Submit Clue
-                  </Button>
+              {alreadySubmittedClue ? (
+                <div className="text-center py-8">
+                  <h3 className="text-xl font-semibold text-green-600">Clue Submitted!</h3>
+                  <p className="text-gray-600">Your clue: <Badge variant="outline">{myPlayer?.clue}</Badge></p>
+                  <p className="mt-2 text-sm">Waiting for other players...</p>
                 </div>
               ) : (
-                <div className="text-center py-8">
-                  <div className="text-lg">
-                    Waiting for <strong>{currentPlayer?.name}</strong> to give their clue...
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="clueInput" className="font-semibold">Your one-word clue:</Label>
+                    <Input
+                      id="clueInput"
+                      placeholder="Enter your clue..."
+                      value={currentClue}
+                      onChange={(e) => setCurrentClue(e.target.value.trim())} // Trim whitespace
+                      maxLength={25} // Increased max length slightly
+                      onKeyPress={(e) => e.key === "Enter" && !alreadySubmittedClue && handleSubmitClue()}
+                      disabled={alreadySubmittedClue || timeLeft === 0}
+                    />
                   </div>
-                  <div className="mt-2 text-sm text-gray-600">
-                    Think about what clue you'll give for: <strong>{myPlayer?.word}</strong>
-                  </div>
+                  <Button
+                    onClick={handleSubmitClue}
+                    disabled={!currentClue.trim() || alreadySubmittedClue || timeLeft === 0}
+                    className="w-full bg-teal-600 hover:bg-teal-700 text-white"
+                  >
+                    {alreadySubmittedClue ? "Clue Sent!" : "Submit Clue"}
+                  </Button>
                 </div>
               )}
             </CardContent>
           </Card>
 
-          {/* Previous Clues */}
-          {room.players.some((p) => p.clue) && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Clues Given So Far</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="grid gap-2">
-                  {room.players
-                    .filter((p) => p.clue)
-                    .map((player) => (
-                      <div key={player.id} className="flex justify-between items-center p-2 bg-gray-50 rounded">
-                        <span className="font-medium">{player.name}</span>
-                        <Badge variant="outline">{player.clue}</Badge>
-                      </div>
-                    ))}
-                </div>
-              </CardContent>
-            </Card>
+          {/* Reminder / Status */}
+          {timeLeft > 0 && !alreadySubmittedClue && (
+            <p className="text-center text-sm text-gray-500">
+              {room.players.filter(p => p.clue && p.clue.trim() !== "").length} / {room.players.filter(p => !p.is_eliminated).length} players have submitted clues.
+            </p>
           )}
+           {timeLeft === 0 && !alreadySubmittedClue && (
+            <p className="text-center text-sm text-red-500 font-semibold">
+              Time's up! You didn't submit a clue.
+            </p>
+          )}
+
         </div>
       </div>
-    )
+    );
   }
+
 
   if (room.game_phase === "discussion") {
     return (
