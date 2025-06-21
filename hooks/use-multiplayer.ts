@@ -137,12 +137,15 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
                     filter: `id=eq.${roomCode.toUpperCase()}`,
                   },
                   async (payload) => {
-                    console.log("Room change detected:", payload)
-                    // Fetch the latest room data when changes occur
-                    const updatedRoom = await GameStore.getRoom(roomCode)
+                    console.log(`[Supabase Realtime] Event on 'game_rooms' received for room ${roomCode}. Type: ${payload.eventType}. Payload:`, JSON.stringify(payload));
+                    const updatedRoom = await GameStore.getRoom(roomCode);
                     if (isMounted && updatedRoom) {
-                      console.log("Updating room with", updatedRoom.players.length, "players")
-                      setRoom(updatedRoom)
+                      console.log(`[Supabase Realtime] 'game_rooms' event: Updating room ${roomCode} with ${updatedRoom.players.length} players. Player IDs: ${updatedRoom.players.map(p=>p.id).join(', ')}.`);
+                      setRoom(updatedRoom);
+                    } else if (isMounted && !updatedRoom) {
+                      console.warn(`[Supabase Realtime] 'game_rooms' event: GameStore.getRoom(${roomCode}) returned null or undefined.`);
+                    } else if (!isMounted) {
+                      console.log(`[Supabase Realtime] 'game_rooms' event: Component not mounted, skipping setRoom for room ${roomCode}.`);
                     }
                   },
                 )
@@ -155,12 +158,14 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
                     filter: `room_id=eq.${roomCode.toUpperCase()}`,
                   },
                   async (payload) => {
-                    console.log("Player change detected:", payload)
+                  console.log(`[Supabase Realtime] Event on 'game_rooms' received for room ${roomCode}. Payload:`, JSON.stringify(payload));
                     // Fetch the latest room data when player changes occur
-                    const updatedRoom = await GameStore.getRoom(roomCode)
+                  const updatedRoom = await GameStore.getRoom(roomCode);
                     if (isMounted && updatedRoom) {
-                      console.log("Updating room with", updatedRoom.players.length, "players")
-                      setRoom(updatedRoom)
+                    console.log(`[Supabase Realtime] 'game_rooms' event: Updating room ${roomCode} with ${updatedRoom.players.length} players. Full room data:`, JSON.stringify(updatedRoom));
+                    setRoom(updatedRoom);
+                  } else if (isMounted && !updatedRoom) {
+                    console.warn(`[Supabase Realtime] 'game_rooms' event: GameStore.getRoom(${roomCode}) returned null or undefined.`);
                     }
                   },
                 )
