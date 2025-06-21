@@ -405,13 +405,11 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
       }
       return true; // startGame initiated successfully from admin's perspective
     } catch (err) {
-      console.error("Failed to start game:", err)
+      console.error("Failed to start game:", err);
       setError(err instanceof Error ? err.message : "An unknown error occurred while starting the game.");
-    } catch (err) {
-      console.error("Failed to start game:", err)
-      return false
+      return false; // Ensure startGame returns false on error
     }
-  }, [room, isConnected, roomCode])
+  }, [room, playerId, isConnected, roomCode, isAdmin]) // Added isAdmin, playerId might be needed if error involves specific player actions by admin
 
   // Submit clue
   const submitClue = useCallback(
