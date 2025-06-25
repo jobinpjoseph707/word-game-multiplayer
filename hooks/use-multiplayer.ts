@@ -489,40 +489,36 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
           let maxVotes = -1;
 
           // Determine who to eliminate among active players
-          // Consider only players who are not already eliminated
           const candidatesForElimination = roomAfterVote.players.filter(p => !p.is_eliminated);
+          let playerToEliminate: Player | undefined = undefined;
 
           if (candidatesForElimination.length > 0) {
-            // Simple model: player with most votes is eliminated. Ties mean no one or first one.
-            // A more robust model might handle ties explicitly (e.g. revote, or random).
-            // Current logic: find one player with max votes.
-            playerToEliminate = candidatesForElimination.reduce((highestVoted, currentPlayer) => {
-                if ((currentPlayer.votes || 0) > (highestVoted.votes || 0)) {
-                    return currentPlayer;
-                }
-                // Basic tie-breaking: keep the one found first if votes are equal.
-                // Or, if you want to ensure some elimination, if votes are equal and positive,
-                // you might prefer the one earlier in the list or a random one.
-                // For simplicity, this picks one. If all have 0 votes, first player is picked.
-                return (currentPlayer.votes || 0) === (highestVoted.votes || 0) && (currentPlayer.votes || 0) === 0 ? highestVoted :
-                       (currentPlayer.votes || 0) > (highestVoted.votes || 0) ? currentPlayer : highestVoted;
+            // Find the maximum number of votes received by any candidate
+            const maxVotes = Math.max(...candidatesForElimination.map(p => p.votes || 0));
 
-            }, candidatesForElimination[0]); // Initialize with the first candidate
+            // Identify all players who received these maximum votes
+            const playersWithMaxVotes = candidatesForElimination.filter(p => (p.votes || 0) === maxVotes);
 
-            // Ensure someone was actually voted for (at least 1 vote)
-            if (playerToEliminate && (playerToEliminate.votes || 0) > 0) {
-                const eliminationSuccess = await GameStore.updatePlayer(roomCode, playerToEliminate.id, { is_eliminated: true });
-                if (!eliminationSuccess) {
-                    setError("Failed to process elimination. Please try again or contact support.");
-                    return false;
-                }
+            // If maxVotes is greater than 0, and there are players with that many votes, eliminate one.
+            // (This also handles the case where all players have 0 votes - no one is eliminated then)
+            if (maxVotes > 0 && playersWithMaxVotes.length > 0) {
+              // For simplicity, pick the first player among those tied for the highest votes.
+              // A more complex tie-breaking (e.g., random) could be implemented here if needed.
+              playerToEliminate = playersWithMaxVotes[0];
+
+              console.log(`Player to eliminate: ${playerToEliminate.name} with ${playerToEliminate.votes} votes.`);
+              const eliminationSuccess = await GameStore.updatePlayer(roomCode, playerToEliminate.id, { is_eliminated: true });
+              if (!eliminationSuccess) {
+                  setError("Failed to process elimination. Please try again or contact support.");
+                  return false; // Critical error, stop processing.
+              }
             } else {
-                console.log("No player received enough votes to be eliminated or tie with zero votes.");
-                // In a real game, might announce "No one was eliminated" and proceed to next round/game end check.
-                // For now, we proceed as if no one was eliminated this round if no positive votes.
+              console.log("No player received any votes, or all candidates had 0 votes. No one will be eliminated this round.");
+              // This case means no elimination occurs, and the game will proceed to check end conditions / next round.
             }
+          } else {
+            console.log("No candidates for elimination (e.g., only one player left or all eliminated).");
           }
-
 
           // Reset votes and has_voted status for ALL players for the next round
           for (const p of roomAfterVote.players) { // Use roomAfterVote.players
