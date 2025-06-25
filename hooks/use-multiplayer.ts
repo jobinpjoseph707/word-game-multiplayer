@@ -490,7 +490,7 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
 
           // Determine who to eliminate among active players
           const candidatesForElimination = roomAfterVote.players.filter(p => !p.is_eliminated);
-          let playerToEliminate: Player | undefined = undefined;
+          let playerToEliminate: Player | undefined;
 
           if (candidatesForElimination.length > 0) {
             // Find the maximum number of votes received by any candidate
