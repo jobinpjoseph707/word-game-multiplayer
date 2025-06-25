@@ -48,6 +48,8 @@ export default function GameRoom({ roomCode, playerName, isAdmin, onLeave }: Gam
     leaveRoom,
     retry,
     backendType,
+    playerReadyToVote,
+    restartGame,
   } = useMultiplayer(roomCode, playerName, isAdmin)
 
   const [currentClue, setCurrentClue] = useState("")
