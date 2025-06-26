@@ -20,6 +20,7 @@ interface Room {
   eliminationResult: string | null
   gameWinner: 'majority' | 'imposters' | null
   lastEliminatedPlayerId: string | null
+  voteCounts: Record<string, number> | null;
 }
 
 interface Player {
@@ -352,6 +353,7 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
         eliminationResult: null,
         gameWinner: null,
         lastEliminatedPlayerId: null,
+        voteCounts: null,
       } as any)
 
       if (!currentRoomState) {
@@ -532,13 +534,19 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
             return false;
           }
 
+          // Capture vote counts before they are reset
+          const voteCountsForDisplay: Record<string, number> = {};
+          currentRoomState.players.forEach(p => {
+            voteCountsForDisplay[p.id] = p.votes || 0;
+          });
+
           const candidatesForElimination = currentRoomState.players.filter(p => !p.is_eliminated);
 
           if (candidatesForElimination.length > 0) {
             let maxVotes = -1;
             let playersWithMaxVotes: Player[] = [];
             for (const candidate of candidatesForElimination) {
-              const currentVotes = candidate.votes || 0;
+              const currentVotes = candidate.votes || 0; // Use votes from currentRoomState
               if (currentVotes > maxVotes) {
                 maxVotes = currentVotes;
                 playersWithMaxVotes = [candidate];
@@ -551,27 +559,21 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
               playerToEliminate = playersWithMaxVotes[0];
               currentEliminationResult = `Player ${playerToEliminate.name} has been eliminated.`;
               currentLastEliminatedPlayerId = playerToEliminate.id;
-              // Mark player as eliminated in the database
               await GameStore.updatePlayer(roomCode, playerToEliminate.id, { is_eliminated: true });
             } else {
               currentEliminationResult = "No one was eliminated this round.";
               currentLastEliminatedPlayerId = null;
-              if (maxVotes > 0 && playersWithMaxVotes.length > 1) {
-                console.log("Tie in votes. No player eliminated.");
-              } else {
-                console.log("No player received positive votes. No player eliminated.");
-              }
+              // console.logs for tie or no positive votes remain the same
             }
           } else {
-            currentEliminationResult = "No candidates for elimination."; // Should not happen if game is ongoing
+            currentEliminationResult = "No candidates for elimination.";
           }
 
-          // Reset votes and has_voted status for ALL players for the next round/end game
+          // Reset votes and has_voted status for ALL players
           for (const p of currentRoomState.players) {
             await GameStore.updatePlayer(roomCode, p.id, { votes: 0, has_voted: false });
           }
 
-          // Fetch the most up-to-date room state after eliminations and vote resets
           let roomAfterUpdates = await GameStore.getRoom(roomCode);
           if (!roomAfterUpdates) {
             setError("Failed to fetch room state after elimination and vote reset.");
@@ -624,21 +626,21 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
               gameWinner: gameWinner,
               game_phase: nextPhase,
               time_left: 0, // Or time for results screen
+              voteCounts: voteCountsForDisplay, // Persist vote counts for final results display
             });
           } else {
             // Game continues, prepare for next round (clue submission)
-            // Reset clues for active players before updating the room for the next phase
             for (const p of finalActivePlayers) {
               await GameStore.updatePlayer(roomCode, p.id, { clue: "" });
             }
-            // Update room state for round_results display, then it will transition to simultaneous_clues
             await GameStore.updateRoom(roomCode, {
               eliminationResult: currentEliminationResult,
               lastEliminatedPlayerId: currentLastEliminatedPlayerId,
-              gameWinner: null, // Ensure gameWinner is null if game is not over
+              gameWinner: null,
               game_phase: nextPhase, // "round_results"
-              round: roomAfterUpdates.round, // Round will be incremented when moving from round_results
-              time_left: nextTimeLeft, // Time for round_results display
+              round: roomAfterUpdates.round,
+              time_left: nextTimeLeft,
+              voteCounts: voteCountsForDisplay, // Add vote counts for display
             });
 
             // Admin will orchestrate transition from 'round_results' to 'simultaneous_clues'
@@ -666,6 +668,7 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
                             current_player_index: 0,
                             eliminationResult: null, // Clear for next round
                             lastEliminatedPlayerId: null, // Clear for next round
+                            voteCounts: null, // Clear vote counts for the new round
                         });
                     }
                 }, nextTimeLeft * 1000);
@@ -794,6 +797,7 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
         eliminationResult: null,
         gameWinner: null,
         lastEliminatedPlayerId: null,
+        voteCounts: null,
         // Settings (totalPlayers, imposterCount, difficulty) are preserved
       } as any);
 
