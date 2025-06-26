@@ -619,14 +619,14 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
           // This assumes words don't change mid-game, which is typical.
           // A more robust way would be to store initial role or word type if words can be synonyms.
           // For this, we rely on the distinct words assigned at game start.
-          const wordSet = new Set(roomAfterUpdates.players.map(p => p.word).filter(w => w));
+          const wordSet = new Set(roomAfterEliminationAndReset.players.map(p => p.word).filter(w => w));
           const distinctWords = Array.from(wordSet);
           let actualMajorityWord = distinctWords.length > 0 ? distinctWords[0] : ""; // Fallback
           let actualImposterWord = distinctWords.length > 1 ? distinctWords[1] : ""; // Fallback, might be same if only one word type
 
           if (distinctWords.length === 2) { // Standard scenario
-            const count1 = roomAfterUpdates.players.filter(p => p.word === distinctWords[0]).length;
-            const count2 = roomAfterUpdates.players.filter(p => p.word === distinctWords[1]).length;
+            const count1 = roomAfterEliminationAndReset.players.filter(p => p.word === distinctWords[0]).length;
+            const count2 = roomAfterEliminationAndReset.players.filter(p => p.word === distinctWords[1]).length;
             actualMajorityWord = count1 >= count2 ? distinctWords[0] : distinctWords[1];
             actualImposterWord = count1 < count2 ? distinctWords[0] : distinctWords[1];
           } else if (distinctWords.length === 1) { // All players got same word (e.g. very small game, no imposters assigned)
@@ -641,7 +641,7 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
             gameWinner = 'majority'; // All imposters eliminated or no imposters to begin with
           } else if (activeMajorityCount === 0) {
             gameWinner = 'imposters'; // All majority players eliminated
-          } else if (activeImposterCount >= activeMajorityCount) {
+          } else if (activeImposterCount > 0 && activeImposterCount >= activeMajorityCount) {
             gameWinner = 'imposters'; // Imposters outnumber or equal majority
           }
           // Add other win conditions if necessary e.g. finalActivePlayers.length <= room.settings.imposterCount
