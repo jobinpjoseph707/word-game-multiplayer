@@ -4,10 +4,13 @@
 CREATE TABLE IF NOT EXISTS game_rooms (
   id TEXT PRIMARY KEY,
   settings JSONB NOT NULL DEFAULT '{"totalPlayers": 6, "imposterCount": 2, "difficulty": "easy", "roundTime": 10}',
-  game_phase TEXT NOT NULL DEFAULT 'lobby' CHECK (game_phase IN ('lobby', 'starting', 'clues', 'discussion', 'voting', 'results')),
+  game_phase TEXT NOT NULL DEFAULT 'lobby' CHECK (game_phase IN ('lobby', 'starting', 'clues', 'discussion', 'voting', 'reveal_votes', 'results')),
   current_player_index INTEGER NOT NULL DEFAULT 0,
   time_left INTEGER NOT NULL DEFAULT 0,
   round INTEGER NOT NULL DEFAULT 1,
+  vote_counts JSONB DEFAULT '{}'::jsonb,
+  elimination_result TEXT,
+  last_eliminated_player_id TEXT,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   last_activity TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );

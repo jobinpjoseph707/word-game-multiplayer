@@ -13,13 +13,14 @@ interface Room {
     difficulty: "easy" | "medium" | "hard"
     roundTime: number
   }
-  game_phase: "lobby" | "starting" | "clues" | "discussion" | "voting" | "results" | "round_results" // Potentially add "round_results" if needed
+  game_phase: "lobby" | "starting" | "clues" | "discussion" | "voting" | "reveal_votes" | "results"
   current_player_index: number
   time_left: number
   round: number
-  eliminationResult: string | null
+  vote_counts?: Record<string, number>
+  elimination_result: string | null
   gameWinner: 'majority' | 'imposters' | null
-  lastEliminatedPlayerId: string | null
+  last_eliminated_player_id: string | null
 }
 
 interface Player {
@@ -30,7 +31,7 @@ interface Player {
   clue?: string
   votes: number
   is_eliminated?: boolean
-  has_voted?: boolean
+  has_voted?: boolean // Now part of GameStore's Player state
   is_ready_to_vote?: boolean; // New field for discussion phase
 }
 
@@ -347,9 +348,9 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
         time_left: 5,          // 5 second word reveal
         current_player_index: 0, // Reset, though not used for clues now
         round: 1, // Ensure round starts at 1
-        eliminationResult: null,
+        elimination_result: null,
         gameWinner: null,
-        lastEliminatedPlayerId: null,
+        last_eliminated_player_id: null,
       } as any)
 
       if (!currentRoomState) {
@@ -491,151 +492,41 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
         const nonVotedActivePlayers = activePlayersInRoom.filter(p => !p.has_voted).length;
 
         if (nonVotedActivePlayers === 0) {
-          // All active players have voted. Proceed to tally and game logic.
-          let playerToEliminate: Player | undefined = undefined;
-          let currentEliminationResult: string | null = null;
-          let currentLastEliminatedPlayerId: string | null = null;
-          let currentRoomState = await GameStore.getRoom(roomCode); // Get fresh state before updates
-
+          // All active players have voted.
+          // Tally votes and prepare for reveal.
+          const currentRoomState = await GameStore.getRoom(roomCode);
           if (!currentRoomState) {
-            setError("Failed to fetch room state before tallying votes.");
+            setError("Failed to fetch room state before revealing votes.");
             return false;
           }
 
-          const candidatesForElimination = currentRoomState.players.filter(p => !p.is_eliminated);
-
-          if (candidatesForElimination.length > 0) {
-            let maxVotes = -1;
-            let playersWithMaxVotes: Player[] = [];
-            for (const candidate of candidatesForElimination) {
-              const currentVotes = candidate.votes || 0;
-              if (currentVotes > maxVotes) {
-                maxVotes = currentVotes;
-                playersWithMaxVotes = [candidate];
-              } else if (currentVotes === maxVotes) {
-                playersWithMaxVotes.push(candidate);
-              }
+          const voteCounts: Record<string, number> = {};
+          currentRoomState.players.forEach(p => {
+            if (p.votes > 0) { // Only include players who received votes
+              voteCounts[p.id] = p.votes;
             }
+          });
 
-            if (maxVotes > 0 && playersWithMaxVotes.length === 1) {
-              playerToEliminate = playersWithMaxVotes[0];
-              currentEliminationResult = `Player ${playerToEliminate.name} has been eliminated.`;
-              currentLastEliminatedPlayerId = playerToEliminate.id;
-              // Mark player as eliminated in the database
-              await GameStore.updatePlayer(roomCode, playerToEliminate.id, { is_eliminated: true });
-            } else {
-              currentEliminationResult = "No one was eliminated this round.";
-              currentLastEliminatedPlayerId = null;
-              if (maxVotes > 0 && playersWithMaxVotes.length > 1) {
-                console.log("Tie in votes. No player eliminated.");
-              } else {
-                console.log("No player received positive votes. No player eliminated.");
-              }
-            }
-          } else {
-            currentEliminationResult = "No candidates for elimination."; // Should not happen if game is ongoing
-          }
+          console.log("All votes are in. Transitioning to reveal_votes phase.");
+          const revealTimeSeconds = 10; // Admin-controlled, but hardcoded for now as per example (5-10s)
 
-          // Reset votes and has_voted status for ALL players for the next round/end game
-          for (const p of currentRoomState.players) {
-            await GameStore.updatePlayer(roomCode, p.id, { votes: 0, has_voted: false });
-          }
-
-          // Fetch the most up-to-date room state after eliminations and vote resets
-          let roomAfterUpdates = await GameStore.getRoom(roomCode);
-          if (!roomAfterUpdates) {
-            setError("Failed to fetch room state after elimination and vote reset.");
-            return false;
-          }
-
-          const finalActivePlayers = roomAfterUpdates.players.filter(p => !p.is_eliminated);
-          let gameWinner: 'majority' | 'imposters' | null = null;
-
-          // Determine true majority and imposter words based on initial assignments
-          // This assumes words don't change mid-game, which is typical.
-          // A more robust way would be to store initial role or word type if words can be synonyms.
-          // For this, we rely on the distinct words assigned at game start.
-          const wordSet = new Set(roomAfterUpdates.players.map(p => p.word).filter(w => w));
-          const distinctWords = Array.from(wordSet);
-          let actualMajorityWord = distinctWords.length > 0 ? distinctWords[0] : ""; // Fallback
-          let actualImposterWord = distinctWords.length > 1 ? distinctWords[1] : ""; // Fallback, might be same if only one word type
-
-          if (distinctWords.length === 2) { // Standard scenario
-            const count1 = roomAfterUpdates.players.filter(p => p.word === distinctWords[0]).length;
-            const count2 = roomAfterUpdates.players.filter(p => p.word === distinctWords[1]).length;
-            actualMajorityWord = count1 >= count2 ? distinctWords[0] : distinctWords[1];
-            actualImposterWord = count1 < count2 ? distinctWords[0] : distinctWords[1];
-          } else if (distinctWords.length === 1) { // All players got same word (e.g. very small game, no imposters assigned)
-            actualMajorityWord = distinctWords[0];
-            actualImposterWord = ""; // No imposter word
-          }
-
-          const activeMajorityCount = finalActivePlayers.filter(p => p.word === actualMajorityWord).length;
-          const activeImposterCount = finalActivePlayers.filter(p => p.word === actualImposterWord && actualImposterWord !== "").length;
-
-          if (actualImposterWord === "" || activeImposterCount === 0) {
-            gameWinner = 'majority'; // All imposters eliminated or no imposters to begin with
-          } else if (activeMajorityCount === 0) {
-            gameWinner = 'imposters'; // All majority players eliminated
-          } else if (activeImposterCount >= activeMajorityCount) {
-            gameWinner = 'imposters'; // Imposters outnumber or equal majority
-          }
-          // Add other win conditions if necessary e.g. finalActivePlayers.length <= room.settings.imposterCount
-
-          let nextPhase: Room["game_phase"] = "round_results"; // Default to showing round results
-          let nextTimeLeft = 5; // Time for round_results display
-
-          if (gameWinner) {
-            nextPhase = "results"; // Go to final game results
-            // Update room with game winner and final elimination result
-            await GameStore.updateRoom(roomCode, {
-              eliminationResult: currentEliminationResult,
-              lastEliminatedPlayerId: currentLastEliminatedPlayerId,
-              gameWinner: gameWinner,
-              game_phase: nextPhase,
-              time_left: 0, // Or time for results screen
-            });
-          } else {
-            // Game continues, prepare for next round (clue submission)
-            // Reset clues for active players before updating the room for the next phase
-            for (const p of finalActivePlayers) {
-              await GameStore.updatePlayer(roomCode, p.id, { clue: "" });
-            }
-            // Update room state for round_results display, then it will transition to simultaneous_clues
-            await GameStore.updateRoom(roomCode, {
-              eliminationResult: currentEliminationResult,
-              lastEliminatedPlayerId: currentLastEliminatedPlayerId,
-              gameWinner: null, // Ensure gameWinner is null if game is not over
-              game_phase: nextPhase, // "round_results"
-              round: roomAfterUpdates.round, // Round will be incremented when moving from round_results
-              time_left: nextTimeLeft, // Time for round_results display
-            });
-
-            // Admin will orchestrate transition from 'round_results' to 'simultaneous_clues'
-            if (isAdmin) {
-                setTimeout(async () => {
-                    const roomAtRoundResultEnd = await GameStore.getRoom(roomCode);
-                    if (roomAtRoundResultEnd && roomAtRoundResultEnd.game_phase === "round_results") {
-                        await GameStore.updateRoom(roomCode, {
-                            game_phase: "simultaneous_clues",
-                            round: roomAtRoundResultEnd.round + 1,
-                            time_left: 20, // Time for clue submission
-                            current_player_index: 0,
-                            eliminationResult: null, // Clear for next round
-                            lastEliminatedPlayerId: null, // Clear for next round
-                        });
-                    }
-                }, nextTimeLeft * 1000);
-            }
-          }
+          await GameStore.updateRoom(roomCode, {
+            vote_counts: voteCounts,
+            game_phase: "reveal_votes",
+            time_left: revealTimeSeconds,
+            elimination_result: null, // Clear any previous result
+            last_eliminated_player_id: null, // Clear any previous result
+          });
+          // The admin client will handle the transition from "reveal_votes" to elimination logic.
         }
         return true;
       } catch (err) {
         console.error("Failed to submit vote:", err);
+        setError(err instanceof Error ? err.message : "An unknown error occurred while submitting vote.");
         return false
       }
     },
-    [room, playerId, isConnected, roomCode],
+    [room, playerId, isConnected, roomCode, isAdmin], // Added isAdmin as it's used in the old code for timeouts
   )
 
   // Leave room
@@ -705,6 +596,28 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
     }
   }, [room, playerId, isConnected, roomCode, isAdmin]);
 
+  // Effect for admin to handle phase transitions after timeouts
+  useEffect(() => {
+    if (isAdmin && room && room.game_phase === "reveal_votes" && room.time_left && room.time_left > 0 && isConnected) {
+      console.log(`[Admin] Detected reveal_votes phase for ${room.time_left}s. Setting timeout.`);
+      const timerId = setTimeout(async () => {
+        // Ensure the game is still in the reveal_votes phase before proceeding
+        // This handles cases where the phase might have changed due to other events
+        const currentRoomState = await GameStore.getRoom(roomCode);
+        if (currentRoomState && currentRoomState.game_phase === "reveal_votes") {
+          adminProcessElimination(roomCode);
+        } else {
+          console.log("[Admin] Reveal votes timeout executed, but game phase has changed. No action taken.");
+        }
+      }, room.time_left * 1000);
+
+      return () => {
+        console.log("[Admin] Clearing reveal_votes timeout.");
+        clearTimeout(timerId);
+      };
+    }
+  }, [room?.game_phase, room?.time_left, isAdmin, roomCode, isConnected]);
+
 
   const restartGame = useCallback(async () => {
     if (!room || !playerId || !isConnected || !isAdmin || room.game_phase !== "results") {
@@ -747,9 +660,9 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
         round: 1,
         current_player_index: 0,
         time_left: 0,
-        eliminationResult: null,
+        elimination_result: null,
         gameWinner: null,
-        lastEliminatedPlayerId: null,
+        last_eliminated_player_id: null,
         // Settings (totalPlayers, imposterCount, difficulty) are preserved
       } as any);
 
@@ -795,6 +708,155 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
     backendType,
     playerReadyToVote,
     restartGame, // New function for Play Again
+  }
+}
+
+// Function for admin to process elimination after reveal_votes phase
+async function adminProcessElimination(roomCode: string) {
+  console.log(`[Admin] Reveal votes phase ended for room ${roomCode}. Initiating elimination process.`);
+
+  let roomState = await GameStore.getRoom(roomCode);
+  if (!roomState) {
+    console.error(`[Admin] Failed to get room state for ${roomCode} before elimination.`);
+    return;
+  }
+
+  // Ensure we are coming from reveal_votes phase. This is a safeguard.
+  if (roomState.game_phase !== "reveal_votes") {
+    console.warn(`[Admin] adminProcessElimination called for room ${roomCode} but phase is ${roomState.game_phase}, not reveal_votes. Aborting.`);
+    return;
+  }
+
+  let playerToEliminate: Player | undefined = undefined;
+  let newEliminationResult: string | null = null;
+  let newLastEliminatedPlayerId: string | null = null;
+
+  // Use player.votes directly as they reflect the votes received
+  const candidatesForElimination = roomState.players.filter(p => !p.is_eliminated);
+
+  if (candidatesForElimination.length > 0) {
+    let maxVotes = -1;
+    let playersWithMaxVotes: Player[] = [];
+
+    candidatesForElimination.forEach(candidate => {
+      const currentVotes = candidate.votes || 0;
+      if (currentVotes > 0) { // Only consider players who received votes
+        if (currentVotes > maxVotes) {
+          maxVotes = currentVotes;
+          playersWithMaxVotes = [candidate];
+        } else if (currentVotes === maxVotes) {
+          playersWithMaxVotes.push(candidate);
+        }
+      }
+    });
+
+    if (maxVotes > 0 && playersWithMaxVotes.length === 1) {
+      playerToEliminate = playersWithMaxVotes[0];
+      newEliminationResult = `Player ${playerToEliminate.name} has been eliminated.`;
+      newLastEliminatedPlayerId = playerToEliminate.id;
+
+      // Mark player as eliminated in the database
+      const updatedRoomAfterElimination = await GameStore.updatePlayer(roomCode, playerToEliminate.id, { is_eliminated: true });
+      if (updatedRoomAfterElimination) {
+        roomState = updatedRoomAfterElimination; // Refresh roomState with the update
+      } else {
+        console.error(`[Admin] Failed to update player ${playerToEliminate.id} as eliminated.`);
+        // Potentially revert or handle error - for now, proceed with stale roomState if update failed
+      }
+    } else if (maxVotes > 0 && playersWithMaxVotes.length > 1) {
+      newEliminationResult = "Tie vote! No one was eliminated this round.";
+      console.log(`[Admin] Tie in votes for room ${roomCode}. No player eliminated.`);
+    } else {
+      newEliminationResult = "No one received enough votes. No one was eliminated this round.";
+      console.log(`[Admin] No player received positive votes or no votes cast in room ${roomCode}. No player eliminated.`);
+    }
+  } else {
+    newEliminationResult = "No candidates for elimination."; // Should ideally not happen if game is ongoing
+    console.log(`[Admin] No candidates for elimination in room ${roomCode}.`);
+  }
+
+  // Refresh room state again to be absolutely sure about player statuses after potential elimination
+  roomState = await GameStore.getRoom(roomCode);
+  if (!roomState) {
+    console.error(`[Admin] Failed to get room state for ${roomCode} after elimination processing.`);
+    return;
+  }
+
+  // Win Condition Check
+  const finalActivePlayers = roomState.players.filter(p => !p.is_eliminated);
+  let gameWinner: 'majority' | 'imposters' | null = null;
+
+  if (finalActivePlayers.length > 0) { // Only check win conditions if there are active players
+      const wordSet = new Set(roomState.players.map(p => p.word).filter(w => w)); // Use all players for word diversity
+      const distinctWords = Array.from(wordSet);
+      let actualMajorityWord = "";
+      let actualImposterWord = "";
+
+      if (distinctWords.length === 2) {
+          const count1 = roomState.players.filter(p => p.word === distinctWords[0]).length;
+          const count2 = roomState.players.filter(p => p.word === distinctWords[1]).length;
+          actualMajorityWord = count1 >= count2 ? distinctWords[0] : distinctWords[1];
+          actualImposterWord = count1 < count2 ? distinctWords[0] : distinctWords[1];
+      } else if (distinctWords.length === 1) {
+          actualMajorityWord = distinctWords[0];
+          // actualImposterWord remains "" - implies no imposters or all have same word as majority
+      }
+
+      const activeMajorityCount = finalActivePlayers.filter(p => p.word === actualMajorityWord).length;
+      const activeImposterCount = finalActivePlayers.filter(p => p.word === actualImposterWord && actualImposterWord !== "").length;
+
+      if (actualImposterWord === "" || activeImposterCount === 0) {
+          gameWinner = 'majority';
+          console.log(`[Admin] Game Over in ${roomCode}: Majority wins (all imposters eliminated or no imposters).`);
+      } else if (activeMajorityCount === 0 && activeImposterCount > 0) { // Ensure imposters are present to win
+          gameWinner = 'imposters';
+          console.log(`[Admin] Game Over in ${roomCode}: Imposters win (all majority eliminated).`);
+      } else if (activeImposterCount > 0 && activeImposterCount >= activeMajorityCount) {
+          gameWinner = 'imposters';
+          console.log(`[Admin] Game Over in ${roomCode}: Imposters win (imposters outnumber or equal majority).`);
+      }
+  } else { // No active players left - this case might need specific handling (e.g. a draw, or last eliminated determines outcome)
+      console.log(`[Admin] No active players left in room ${roomCode}. Game might end based on last elimination or draw.`);
+      // If playerToEliminate exists, their team might have lost.
+      // This scenario might imply the team of the player just eliminated lost, if it leads to 0 active players.
+      // For now, if gameWinner is not set by above conditions, it remains null.
+  }
+
+
+  if (gameWinner) {
+    // Game Ends
+    console.log(`[Admin] Winner found in ${roomCode}: ${gameWinner}. Transitioning to results phase.`);
+    await GameStore.updateRoom(roomCode, {
+      game_phase: "results",
+      gameWinner: gameWinner,
+      elimination_result: newEliminationResult,
+      last_eliminated_player_id: newLastEliminatedPlayerId,
+      time_left: 0, // Or time for results screen
+      // vote_counts are kept for display on results, or cleared here if not needed
+    });
+  } else {
+    // Game Continues: Cleanup for Next Round
+    console.log(`[Admin] No winner yet in ${roomCode}. Proceeding to next round.`);
+
+    // Reset votes and has_voted status for ALL players
+    for (const p of roomState.players) {
+      // Only update if needed, to minimize DB calls, though batching would be better.
+      // For simplicity now, update all.
+      await GameStore.updatePlayer(roomCode, p.id, { votes: 0, has_voted: false, clue: "" });
+    }
+
+    // Update room state for the next round
+    await GameStore.updateRoom(roomCode, {
+      game_phase: "simultaneous_clues",
+      round: (roomState.round || 1) + 1,
+      time_left: 20, // Time for clue submission
+      current_player_index: 0,
+      elimination_result: newEliminationResult, // Show elimination result briefly or it's cleared by phase change
+      last_eliminated_player_id: newLastEliminatedPlayerId,
+      vote_counts: {}, // Clear vote_counts for the new round
+      gameWinner: null, // Ensure gameWinner is null
+    });
+    console.log(`[Admin] Room ${roomCode} transitioned to simultaneous_clues, round ${(roomState.round || 1) + 1}.`);
   }
 }
 

@@ -8,7 +8,7 @@ interface GameSettings {
   roundTime: number
 }
 
-type GamePhase = "lobby" | "starting" | "clues" | "discussion" | "voting" | "results"
+type GamePhase = "lobby" | "starting" | "clues" | "discussion" | "voting" | "reveal_votes" | "results"
 
 interface GameRoomWithPlayers {
   id: string
@@ -20,6 +20,9 @@ interface GameRoomWithPlayers {
   round: number
   created_at: string
   last_activity: string
+  vote_counts?: Record<string, number> // Map of playerId to vote count
+  elimination_result?: string | null
+  last_eliminated_player_id?: string | null
 }
 
 interface Player {
@@ -30,6 +33,7 @@ interface Player {
   word?: string
   clue?: string
   votes: number
+  has_voted?: boolean
   is_eliminated: boolean
   score: number
   last_seen: string
@@ -307,6 +311,7 @@ export class GameStore {
           word: "",
           clue: "",
           votes: 0,
+          has_voted: false,
           is_eliminated: false,
           score: 0,
           last_seen: now,
@@ -444,6 +449,7 @@ export class GameStore {
           word: "",
           clue: "",
           votes: 0,
+          has_voted: false,
           is_eliminated: false,
           score: 0,
           last_seen: now,
@@ -711,6 +717,7 @@ export class GameStore {
           word: "",
           clue: "",
           votes: 0,
+          has_voted: false,
           is_eliminated: false,
           score: 0,
           last_seen: now,
@@ -727,6 +734,9 @@ export class GameStore {
       current_player_index: 0,
       time_left: 0,
       round: 1,
+      vote_counts: {},
+      elimination_result: null,
+      last_eliminated_player_id: null,
       created_at: now,
       last_activity: now,
     }
@@ -802,6 +812,7 @@ export class GameStore {
       word: "",
       clue: "",
       votes: 0,
+      has_voted: false,
       is_eliminated: false,
       score: 0,
       last_seen: now,
