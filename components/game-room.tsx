@@ -756,9 +756,75 @@ export default function GameRoom({ roomCode, playerName, isAdmin, onLeave }: Gam
     )
   }
 
+  // ***** ADDED REVEAL VOTES PHASE UI *****
+  if (room.game_phase === 'reveal_votes') {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-purple-50 to-pink-100 p-4 flex items-center justify-center">
+        <Card className="w-full max-w-lg text-center shadow-xl">
+          <CardHeader>
+            <CardTitle className="text-3xl font-bold text-purple-700">Votes Revealed!</CardTitle>
+            {room.time_left > 0 && (
+              <CardDescription className="text-lg">
+                Next phase in: <span className="font-semibold text-purple-600">{timeLeft}s</span>
+              </CardDescription>
+            )}
+          </CardHeader>
+          <CardContent className="pt-4">
+            {(!room.vote_counts || Object.keys(room.vote_counts).length === 0) && (
+              <p className="text-center text-gray-600 my-6">No votes were recorded in this round.</p>
+            )}
+
+            {room.vote_counts && Object.keys(room.vote_counts).length > 0 && (
+              <div className="space-y-3 my-6">
+                <h3 className="text-xl font-semibold text-gray-700 mb-3">Vote Tally:</h3>
+                <div className="max-h-60 overflow-y-auto space-y-2 pr-2">
+                  {room.players
+                    .map(player => ({
+                      ...player,
+                      voteCount: room.vote_counts?.[player.id] || 0
+                    }))
+                    .sort((a, b) => b.voteCount - a.voteCount) // Sort by votes descending
+                    .map(player => (
+                      <div
+                        key={player.id}
+                        className={`flex items-center justify-between p-3 rounded-lg text-left transition-all duration-150 ease-in-out ${
+                          player.is_eliminated ? "bg-gray-100 opacity-60" : "bg-gray-50 hover:shadow-md"
+                        }`}
+                      >
+                        <div className="flex items-center">
+                          <span className={`font-medium ${player.is_eliminated ? "line-through" : ""}`}>
+                            {player.name}
+                          </span>
+                          {player.id === playerId && (
+                            <Badge variant="outline" className="ml-2 text-xs">You</Badge>
+                          )}
+                          {player.is_eliminated && (
+                            <Badge variant="destructive" className="ml-2 text-xs opacity-100">Eliminated</Badge>
+                          )}
+                        </div>
+                        <span className={`font-bold text-lg ${
+                          (room.vote_counts?.[player.id] || 0) > 0 ? "text-purple-600" : "text-gray-500"
+                        }`}>
+                          {room.vote_counts?.[player.id] || 0} votes
+                        </span>
+                      </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <p className="text-center mt-6 text-sm text-gray-500 italic">
+              The admin is processing the elimination...
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+  // ***** END OF ADDED REVEAL VOTES PHASE UI *****
+
   if (room.game_phase === "results") {
-    const activePlayers = room.players.filter((p) => !p.isEliminated)
-    const eliminatedPlayers = room.players.filter((p) => p.isEliminated)
+    const activePlayers = room.players.filter((p) => !p.is_eliminated) // Corrected from isEliminated
+    const eliminatedPlayers = room.players.filter((p) => p.is_eliminated) // Corrected from isEliminated
 
     // Determine word assignments
     const currentWords = [...new Set(room.players.map((p) => p.word))]
