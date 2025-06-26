@@ -13,7 +13,7 @@ interface Room {
     difficulty: "easy" | "medium" | "hard"
     roundTime: number
   }
-  game_phase: "lobby" | "starting" | "clues" | "voting" | "results" | "round_results"
+  game_phase: "lobby" | "starting" | "clues" | "voting" | "results" | "reveal_votes"
   current_player_index: number
   time_left: number
   round: number
@@ -527,63 +527,95 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
           let playerToEliminate: Player | undefined = undefined;
           let currentEliminationResult: string | null = null;
           let currentLastEliminatedPlayerId: string | null = null;
-          let currentRoomState = await GameStore.getRoom(roomCode); // Get fresh state before updates
-
-          if (!currentRoomState) {
-            setError("Failed to fetch room state before tallying votes.");
+          // All active players have voted.
+          // 1. Capture vote counts and transition to "reveal_votes" phase.
+          let roomStateForVoteCapture = await GameStore.getRoom(roomCode);
+          if (!roomStateForVoteCapture) {
+            setError("Failed to fetch room state for capturing vote counts.");
             return false;
           }
 
-          // Capture vote counts before they are reset
           const voteCountsForDisplay: Record<string, number> = {};
-          currentRoomState.players.forEach(p => {
+          roomStateForVoteCapture.players.forEach(p => {
             voteCountsForDisplay[p.id] = p.votes || 0;
           });
 
-          const candidatesForElimination = currentRoomState.players.filter(p => !p.is_eliminated);
+          const revealVotesTime = 7; // e.g., 7 seconds to display votes
+          const transitionToRevealSuccess = await GameStore.updateRoom(roomCode, {
+            game_phase: "reveal_votes",
+            voteCounts: voteCountsForDisplay,
+            time_left: revealVotesTime,
+            eliminationResult: null, // Not determined yet
+            lastEliminatedPlayerId: null, // Not determined yet
+            gameWinner: null, // Not determined yet
+          });
 
-          if (candidatesForElimination.length > 0) {
-            let maxVotes = -1;
-            let playersWithMaxVotes: Player[] = [];
-            for (const candidate of candidatesForElimination) {
-              const currentVotes = candidate.votes || 0; // Use votes from currentRoomState
-              if (currentVotes > maxVotes) {
-                maxVotes = currentVotes;
-                playersWithMaxVotes = [candidate];
-              } else if (currentVotes === maxVotes) {
-                playersWithMaxVotes.push(candidate);
-              }
-            }
-
-            if (maxVotes > 0 && playersWithMaxVotes.length === 1) {
-              playerToEliminate = playersWithMaxVotes[0];
-              currentEliminationResult = `Player ${playerToEliminate.name} has been eliminated.`;
-              currentLastEliminatedPlayerId = playerToEliminate.id;
-              await GameStore.updatePlayer(roomCode, playerToEliminate.id, { is_eliminated: true });
-            } else {
-              currentEliminationResult = "No one was eliminated this round.";
-              currentLastEliminatedPlayerId = null;
-              // console.logs for tie or no positive votes remain the same
-            }
-          } else {
-            currentEliminationResult = "No candidates for elimination.";
-          }
-
-          // Reset votes and has_voted status for ALL players
-          for (const p of currentRoomState.players) {
-            await GameStore.updatePlayer(roomCode, p.id, { votes: 0, has_voted: false });
-          }
-
-          let roomAfterUpdates = await GameStore.getRoom(roomCode);
-          if (!roomAfterUpdates) {
-            setError("Failed to fetch room state after elimination and vote reset.");
+          if (!transitionToRevealSuccess) {
+            setError("Failed to transition to reveal_votes phase.");
             return false;
           }
+          // Local state will update via subscription. UI shows voteCounts.
 
-          const finalActivePlayers = roomAfterUpdates.players.filter(p => !p.is_eliminated);
-          let gameWinner: 'majority' | 'imposters' | null = null;
+          // 2. Admin orchestrates the processing after reveal_votes phase.
+          if (isAdmin) {
+            setTimeout(async () => {
+              let roomAfterReveal = await GameStore.getRoom(roomCode);
+              if (!roomAfterReveal || roomAfterReveal.game_phase !== "reveal_votes") {
+                // Phase might have changed due to other reasons, or room fetch failed.
+                console.warn("Skipping vote processing as room is no longer in reveal_votes phase or fetch failed.");
+                return;
+              }
 
-          // Determine true majority and imposter words based on initial assignments
+              let playerToEliminate: Player | undefined = undefined;
+              let currentEliminationResult: string | null = null;
+              let currentLastEliminatedPlayerId: string | null = null;
+
+              // Use the persisted voteCounts from roomAfterReveal to determine elimination
+              const currentVoteCounts = roomAfterReveal.voteCounts || {};
+              const candidatesForElimination = roomAfterReveal.players.filter(p => !p.is_eliminated);
+              let maxVotes = -1;
+              let playersWithMaxVotes: Player[] = [];
+
+              if (candidatesForElimination.length > 0) {
+                  for (const candidate of candidatesForElimination) {
+                    const currentVotes = currentVoteCounts[candidate.id] || 0;
+                    if (currentVotes > maxVotes) {
+                        maxVotes = currentVotes;
+                        playersWithMaxVotes = [candidate];
+                    } else if (currentVotes === maxVotes) {
+                        playersWithMaxVotes.push(candidate);
+                    }
+                  }
+
+                  if (maxVotes > 0 && playersWithMaxVotes.length === 1) {
+                    playerToEliminate = playersWithMaxVotes[0];
+                    // IMPORTANT: Elimination happens here, AFTER vote reveal.
+                    await GameStore.updatePlayer(roomCode, playerToEliminate.id, { is_eliminated: true });
+                    currentEliminationResult = `Player ${playerToEliminate.name} has been eliminated.`;
+                    currentLastEliminatedPlayerId = playerToEliminate.id;
+                  } else {
+                    currentEliminationResult = "No one was eliminated this round.";
+                  }
+              } else {
+                currentEliminationResult = "No candidates for elimination.";
+              }
+
+              // Reset votes and has_voted status for ALL players in the database
+              for (const p of roomAfterReveal.players) {
+                await GameStore.updatePlayer(roomCode, p.id, { votes: 0, has_voted: false });
+              }
+
+              // Fetch the latest room state after elimination and vote resets
+              let roomAfterEliminationAndReset = await GameStore.getRoom(roomCode);
+              if (!roomAfterEliminationAndReset) {
+                setError("Failed to fetch room state after processing eliminations.");
+                return;
+              }
+
+              const finalActivePlayers = roomAfterEliminationAndReset.players.filter(p => !p.is_eliminated);
+              let gameWinner: 'majority' | 'imposters' | null = null;
+
+              // Determine true majority and imposter words
           // This assumes words don't change mid-game, which is typical.
           // A more robust way would be to store initial role or word type if words can be synonyms.
           // For this, we rely on the distinct words assigned at game start.
