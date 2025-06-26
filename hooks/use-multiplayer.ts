@@ -375,27 +375,10 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
 
             if (currentRoomState) {
               setRoom(currentRoomState); // Update admin's room state
-
-              // After 20s (clue submission ends), transition to discussion
-              setTimeout(async () => {
-                const roomAtTimeOfClueEnd = await GameStore.getRoom(roomCode);
-                if (roomAtTimeOfClueEnd && roomAtTimeOfClueEnd.game_phase === "simultaneous_clues" && isConnected && room) {
-                  console.log("Simultaneous clue submission ended. Transitioning to discussion (20s)."); // Log updated
-                  const discussionRoomState = await GameStore.updateRoom(roomCode, {
-                    game_phase: "discussion",
-                    time_left: 0, // No specific timer for discussion phase, it ends when players are ready
-                                   // Or set a very long default display timer if needed: e.g., 999
-                    current_player_index: 0, // Reset
-                  } as any);
-
-                  if (!discussionRoomState) {
-                    setError("Failed to transition to discussion phase.");
-                  }
-                  // No automatic timeout to end discussion here anymore.
-                  // Transition to voting will be handled by playerReadyToVote logic.
-                  // Admin's setRoom will be called via subscription for the discussion phase change.
-                }
-              }, 20000); // 20 seconds for clue submission
+              // The setTimeout that previously transitioned from simultaneous_clues to discussion
+              // has been removed. Transition will now be handled by submitClue logic
+              // when all clues are submitted.
+              console.log("Game transitioned to simultaneous_clues. Waiting for all players to submit clues.");
             } else {
               setError("Failed to transition to simultaneous clue phase.");
             }
@@ -434,10 +417,33 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
         // After successfully submitting a clue, update the local room state
         // to reflect this player's clue. GameStore.updatePlayer now returns the full room.
         setRoom(playerUpdateResult);
-        // No need to fetch room state again explicitly here, as playerUpdateResult is the new room state.
-
         console.log(`Player ${playerId} submitted clue: "${clue}"`);
-        return true; // Indicate success
+
+        // Check if all active players have submitted clues
+        const roomAfterClueSubmission = playerUpdateResult; // Use the already updated room state
+
+        const activePlayers = roomAfterClueSubmission.players.filter(p => !p.is_eliminated);
+        const cluesSubmittedCount = activePlayers.filter(p => p.clue && p.clue.trim() !== "").length;
+
+        if (cluesSubmittedCount === activePlayers.length) {
+          console.log("All active players have submitted their clues. Transitioning to discussion phase.");
+          // Optionally, clear time_left for simultaneous_clues phase if it was used for display
+          const discussionRoomState = await GameStore.updateRoom(roomCode, {
+            game_phase: "discussion",
+            time_left: 0, // No specific timer for discussion phase, it ends when players are ready
+            current_player_index: 0, // Reset
+          } as any);
+
+          if (!discussionRoomState) {
+            setError("Failed to transition to discussion phase after all clues submitted.");
+            // Even if transition fails, the clue submission itself was successful.
+          }
+          // UI will update via subscription to show the new 'discussion' phase.
+        } else {
+          console.log(`${cluesSubmittedCount}/${activePlayers.length} clues submitted.`);
+        }
+
+        return true; // Indicate clue submission success
 
       } catch (err) {
         console.error("Error in submitClue:", err);
@@ -451,7 +457,24 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
   // Submit vote
   const submitVote = useCallback(
     async (votedPlayerId: string) => {
-      if (!room || !playerId || !isConnected) return false
+      if (!room || !playerId || !isConnected) return false;
+
+      const currentPlayerWhoIsVoting = room.players.find(p => p.id === playerId);
+      if (!currentPlayerWhoIsVoting) {
+        setError("Could not identify the current player. Vote not submitted.");
+        return false;
+      }
+
+      if (currentPlayerWhoIsVoting.is_eliminated) {
+        setError("Eliminated players cannot vote.");
+        return false;
+      }
+
+      if (currentPlayerWhoIsVoting.has_voted) {
+        setError("You have already voted in this round.");
+        console.warn(`Player ${playerId} attempted to vote again.`);
+        return false; // Already voted
+      }
 
       try {
         // Find the player being voted for
