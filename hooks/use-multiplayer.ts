@@ -13,7 +13,7 @@ interface Room {
     difficulty: "easy" | "medium" | "hard"
     roundTime: number
   }
-  game_phase: "lobby" | "starting" | "clues" | "discussion" | "voting" | "results" | "round_results" // Potentially add "round_results" if needed
+  game_phase: "lobby" | "starting" | "clues" | "voting" | "results" | "round_results"
   current_player_index: number
   time_left: number
   round: number
@@ -31,7 +31,8 @@ interface Player {
   votes: number
   is_eliminated?: boolean
   has_voted?: boolean
-  is_ready_to_vote?: boolean; // New field for discussion phase
+  // is_ready_to_vote?: boolean; // Field is no longer needed as discussion phase is removed
+  has_submitted_clue?: boolean;
 }
 
 export function useMultiplayer(roomCode: string, playerName: string, isAdmin: boolean) {
@@ -328,6 +329,7 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
           is_eliminated: false,
           // has_voted: false, // Temporarily remove to prevent crash if column is missing.
                             // Relies on DB default if column exists. Voting will need has_voted.
+          has_submitted_clue: false,
         }
       })
 
@@ -375,26 +377,9 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
             if (currentRoomState) {
               setRoom(currentRoomState); // Update admin's room state
 
-              // After 20s (clue submission ends), transition to discussion
-              setTimeout(async () => {
-                const roomAtTimeOfClueEnd = await GameStore.getRoom(roomCode);
-                if (roomAtTimeOfClueEnd && roomAtTimeOfClueEnd.game_phase === "simultaneous_clues" && isConnected && room) {
-                  console.log("Simultaneous clue submission ended. Transitioning to discussion (20s)."); // Log updated
-                  const discussionRoomState = await GameStore.updateRoom(roomCode, {
-                    game_phase: "discussion",
-                    time_left: 0, // No specific timer for discussion phase, it ends when players are ready
-                                   // Or set a very long default display timer if needed: e.g., 999
-                    current_player_index: 0, // Reset
-                  } as any);
-
-                  if (!discussionRoomState) {
-                    setError("Failed to transition to discussion phase.");
-                  }
-                  // No automatic timeout to end discussion here anymore.
-                  // Transition to voting will be handled by playerReadyToVote logic.
-                  // Admin's setRoom will be called via subscription for the discussion phase change.
-                }
-              }, 20000); // 20 seconds for clue submission
+              // The transition from 'simultaneous_clues' will now be handled by submitClue
+              // when all clues are submitted, not by a timer here.
+              // The setTimeout for transitioning to discussion is removed.
             } else {
               setError("Failed to transition to simultaneous clue phase.");
             }
@@ -431,13 +416,58 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
         }
 
         // After successfully submitting a clue, update the local room state
-        // to reflect this player's clue. GameStore.updatePlayer now returns the full room.
-        setRoom(playerUpdateResult);
-        // No need to fetch room state again explicitly here, as playerUpdateResult is the new room state.
+        // to reflect this player's clue and their submission status.
+        // GameStore.updatePlayer should ideally return the updated room.
+        // For robustness, we'll use the returned room state from updatePlayer.
 
-        console.log(`Player ${playerId} submitted clue: "${clue}"`);
-        return true; // Indicate success
+        if (!playerUpdateResult) { // Should be caught by the error handler, but good check
+             setError("Failed to submit your clue or update your status.");
+             return false;
+        }
 
+        // Mark player as having submitted a clue. This needs to be part of the updatePlayer call.
+        // Let's assume updatePlayer handles setting has_submitted_clue based on clue presence,
+        // or we modify it to explicitly set has_submitted_clue: true.
+        // For now, we'll update the player again to set has_submitted_clue.
+        // A better approach would be a single GameStore.submitClueAndMarkSubmitted(playerId, clue)
+        const markSubmittedResult = await GameStore.updatePlayer(roomCode, playerId, { has_submitted_clue: true });
+        if (!markSubmittedResult) {
+            console.warn(`Failed to explicitly mark player ${playerId} as having submitted clue, but clue was saved.`);
+            // Proceeding as the clue itself is primary. The room state from this call will be used.
+            setRoom(markSubmittedResult); // Update room with the latest state after marking submitted
+        } else {
+            setRoom(markSubmittedResult); // Update room with the latest state after marking submitted
+        }
+
+        console.log(`Player ${playerId} submitted clue: "${clue}" and marked as submitted.`);
+
+        // Check if all active, non-eliminated players have submitted their clues
+        const currentRoomState = markSubmittedResult || playerUpdateResult; // Use the latest available room state
+
+        const activePlayers = currentRoomState.players.filter(p => !p.is_eliminated);
+        const allCluesSubmitted = activePlayers.every(p => p.has_submitted_clue || p.clue); // Check both, clue presence as fallback
+
+        if (allCluesSubmitted && activePlayers.length > 0) {
+          console.log("All active players have submitted their clues. Transitioning to voting phase.");
+          const transitionToVotingSuccess = await GameStore.updateRoom(roomCode, {
+            game_phase: "voting",
+            time_left: 0, // No timer for voting phase
+            current_player_index: 0, // Reset for voting phase
+            // Ensure player `is_ready_to_vote` is reset if it was used previously, though it's being phased out
+          });
+
+          if (!transitionToVotingSuccess) {
+            setError("Failed to transition to voting phase. Please try again or contact admin.");
+            // Potentially revert player's has_submitted_clue if the phase transition fails critically?
+            // For now, error is set, and game might be in an inconsistent state if this fails.
+            return false; // Indicate that the full operation (including phase transition) did not succeed
+          }
+          // No explicit setRoom(transitionToVotingSuccess) here, will rely on subscription,
+          // or if GameStore.updateRoom returns the room, that would be set.
+          // For consistency, if GameStore.updateRoom returns the new room, we should use it:
+          // setRoom(transitionToVotingSuccess);
+        }
+        return true; // Indicate clue submission success
       } catch (err) {
         console.error("Error in submitClue:", err);
         setError(err instanceof Error ? err.message : "An unknown error occurred while submitting clue.");
@@ -616,9 +646,22 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
                 setTimeout(async () => {
                     const roomAtRoundResultEnd = await GameStore.getRoom(roomCode);
                     if (roomAtRoundResultEnd && roomAtRoundResultEnd.game_phase === "round_results") {
+                        // Reset has_submitted_clue for all active players before starting next clue phase
+                        const activePlayersForNextRound = roomAtRoundResultEnd.players.filter(p => !p.is_eliminated);
+                        for (const p of activePlayersForNextRound) {
+                            await GameStore.updatePlayer(roomCode, p.id, { has_submitted_clue: false });
+                        }
+
+                        // Fetch room state again after player updates, before transitioning phase
+                        const roomAfterPlayerResets = await GameStore.getRoom(roomCode);
+                        if (!roomAfterPlayerResets) {
+                            setError("Failed to fetch room state before transitioning to next clue phase.");
+                            return; // Avoid proceeding with stale or no data
+                        }
+
                         await GameStore.updateRoom(roomCode, {
                             game_phase: "simultaneous_clues",
-                            round: roomAtRoundResultEnd.round + 1,
+                            round: roomAfterPlayerResets.round + 1, // Use potentially updated round number
                             time_left: 20, // Time for clue submission
                             current_player_index: 0,
                             eliminationResult: null, // Clear for next round
@@ -728,7 +771,8 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
           votes: 0,
           is_eliminated: false,
           has_voted: false,      // Assuming has_voted column exists
-          is_ready_to_vote: false, // Reset ready status
+          // is_ready_to_vote: false, // Field removed
+          has_submitted_clue: false, // Reset clue submission status
           // score: 0, // Optionally reset score, or keep it cumulative
         });
         if (!playerResetSuccess) {
@@ -793,7 +837,7 @@ export function useMultiplayer(roomCode: string, playerName: string, isAdmin: bo
     leaveRoom,
     retry,
     backendType,
-    playerReadyToVote,
+    // playerReadyToVote, // Function removed as discussion phase is removed
     restartGame, // New function for Play Again
   }
 }
