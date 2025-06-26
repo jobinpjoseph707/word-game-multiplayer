@@ -8,7 +8,7 @@ interface GameSettings {
   roundTime: number
 }
 
-type GamePhase = "lobby" | "starting" | "clues" | "discussion" | "voting" | "reveal_votes" | "results"
+type GamePhase = "lobby" | "starting" | "clues" | "simultaneous_clues" | "discussion" | "voting" | "reveal_votes" | "results"
 
 interface GameRoomWithPlayers {
   id: string

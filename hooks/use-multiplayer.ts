@@ -13,7 +13,7 @@ interface Room {
     difficulty: "easy" | "medium" | "hard"
     roundTime: number
   }
-  game_phase: "lobby" | "starting" | "clues" | "discussion" | "voting" | "reveal_votes" | "results"
+  game_phase: "lobby" | "starting" | "clues" | "simultaneous_clues" | "discussion" | "voting" | "reveal_votes" | "results"
   current_player_index: number
   time_left: number
   round: number
